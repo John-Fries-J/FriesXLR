@@ -1,0 +1,34 @@
+[package]
+name = "friesxlr-desktop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+build = "build.rs"
+
+[lib]
+name = "friesxlr_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "friesxlr-desktop"
+path = "src/main.rs"
+
+[dependencies]
+goxlr-model = { path = "../../../crates/goxlr-model" }
+goxlr-profile = { path = "../../../crates/goxlr-profile" }
+goxlr-service = { path = "../../../crates/goxlr-service" }
+serde = { workspace = true }
+tauri = { workspace = true, features = ["tray-icon"] }
+tauri-plugin-autostart = { workspace = true }
+tauri-plugin-single-instance = { workspace = true }
+tauri-plugin-window-state = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-appender = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = "1"
+
+[build-dependencies]
+tauri-build = { workspace = true }

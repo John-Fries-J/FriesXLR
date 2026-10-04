@@ -1,0 +1,15 @@
+{
+  "name": "friesxlr-workspace",
+  "private": true,
+  "workspaces": [
+    "apps/desktop"
+  ],
+  "scripts": {
+    "desktop:dev": "npm --workspace @friesxlr/desktop run tauri dev",
+    "desktop:build": "npm --workspace @friesxlr/desktop run tauri build",
+    "frontend:build": "npm --workspace @friesxlr/desktop run build",
+    "frontend:lint": "npm --workspace @friesxlr/desktop run lint",
+    "frontend:test": "npm --workspace @friesxlr/desktop run test"
+  }
+}
+

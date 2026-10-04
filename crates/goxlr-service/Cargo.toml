@@ -1,0 +1,18 @@
+[package]
+name = "goxlr-service"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+goxlr-device = { path = "../goxlr-device" }
+goxlr-model = { path = "../goxlr-model" }
+goxlr-profile = { path = "../goxlr-profile" }
+tokio = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3.13.0"
+

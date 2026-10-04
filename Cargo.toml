@@ -1,0 +1,40 @@
+[workspace]
+resolver = "2"
+members = [
+    "apps/desktop/src-tauri",
+    "crates/goxlr-device",
+    "crates/goxlr-model",
+    "crates/goxlr-profile",
+    "crates/goxlr-protocol",
+    "crates/goxlr-service",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/friesxlr/friesxlr"
+
+[workspace.dependencies]
+async-trait = "0.1.83"
+directories = "5.0.1"
+libloading = "0.8.6"
+parking_lot = "0.12.3"
+serde = { version = "1.0.210", features = ["derive"] }
+serde_json = "1.0.128"
+tauri = "2.1.1"
+tauri-build = "2.0.3"
+tauri-plugin-autostart = "2"
+tauri-plugin-single-instance = "2"
+tauri-plugin-window-state = "2"
+thiserror = "2.0.3"
+tokio = { version = "1.40.0", features = ["macros", "rt-multi-thread", "sync", "time"] }
+tracing = "0.1.40"
+tracing-appender = "0.2.3"
+tracing-subscriber = { version = "0.3.18", features = ["env-filter", "fmt", "json"] }
+winreg = "0.52.0"
+
+[profile.release]
+codegen-units = 1
+lto = true
+strip = "symbols"

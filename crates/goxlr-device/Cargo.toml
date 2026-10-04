@@ -1,0 +1,19 @@
+[package]
+name = "goxlr-device"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+goxlr-model = { path = "../goxlr-model" }
+goxlr-protocol = { path = "../goxlr-protocol" }
+parking_lot = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+libloading = { workspace = true }
+winreg = { workspace = true }
+
