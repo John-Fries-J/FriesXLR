@@ -5,7 +5,9 @@
 //! https://github.com/GoXLR-on-Linux/goxlr-utility
 //! See `NOTICE.md` for attribution.
 
-use goxlr_model::{ChannelName, DeviceModel, FaderName, FaderVolume, VersionNumber};
+use goxlr_model::{
+    ChannelName, DeviceModel, FaderMuteState, FaderName, FaderVolume, MuteFunction, VersionNumber,
+};
 
 pub const TC_HELICON_VENDOR_ID: u16 = 0x1220;
 pub const GOXLR_PRODUCT_ID: u16 = 0x8fe0;
@@ -198,6 +200,76 @@ pub fn parse_button_state_response(response: &[u8]) -> Result<ButtonStateSnapsho
     })
 }
 
+/// Decode the fader assignment payload shape used by GoXLR Utility's
+/// `SetFader` command.
+///
+/// This is intentionally a payload decoder, not a hardware "get assignment"
+/// command. Upstream GoXLR Utility exposes fader assignment from its active
+/// profile state and writes it with the `SetFader` command.
+pub fn parse_fader_assignment_payload(response: &[u8]) -> Result<ChannelName, ProtocolError> {
+    if response.len() < 4 {
+        return Err(ProtocolError::MalformedResponse {
+            reason: format!(
+                "fader assignment payload shorter than 4 bytes: {}",
+                response.len()
+            ),
+        });
+    }
+
+    Ok(channel_from_protocol_index(response[0]))
+}
+
+/// Decode GoXLR Utility profile mute button flags into the IPC mute state.
+///
+/// Upstream treats the blink flag as "muted to all" and the state flag as
+/// "muted to X"; blink wins when both flags are set.
+pub fn mute_state_from_profile_flags(muted_to_x: bool, muted_to_all: bool) -> FaderMuteState {
+    if muted_to_all {
+        return FaderMuteState::MutedToAll;
+    }
+    if muted_to_x {
+        return FaderMuteState::MutedToX;
+    }
+
+    FaderMuteState::Unmuted
+}
+
+pub fn parse_mute_state_payload(response: &[u8]) -> Result<FaderMuteState, ProtocolError> {
+    if response.len() < 2 {
+        return Err(ProtocolError::MalformedResponse {
+            reason: format!("mute state payload shorter than 2 bytes: {}", response.len()),
+        });
+    }
+
+    Ok(mute_state_from_profile_flags(
+        response[0] != 0,
+        response[1] != 0,
+    ))
+}
+
+pub fn mute_function_from_profile_index(index: u8) -> MuteFunction {
+    match index {
+        0 => MuteFunction::All,
+        1 => MuteFunction::ToStream,
+        2 => MuteFunction::ToVoiceChat,
+        3 => MuteFunction::ToPhones,
+        4 => MuteFunction::ToLineOut,
+        5 => MuteFunction::ToStream2,
+        6 => MuteFunction::ToStreams,
+        _ => MuteFunction::Unknown,
+    }
+}
+
+pub fn parse_mute_function_payload(response: &[u8]) -> Result<MuteFunction, ProtocolError> {
+    let Some(index) = response.first() else {
+        return Err(ProtocolError::MalformedResponse {
+            reason: "mute function payload is empty".to_string(),
+        });
+    };
+
+    Ok(mute_function_from_profile_index(*index))
+}
+
 pub fn parse_firmware_response(response: &[u8]) -> Result<VersionNumber, ProtocolError> {
     if response.len() < 8 {
         return Err(ProtocolError::MalformedResponse {
@@ -382,6 +454,74 @@ mod tests {
 
         assert_eq!(state.fader_volumes, [10, 20, 30, 40]);
         assert_eq!(state.fader_mute_pressed, [true, false, false, true]);
+    }
+
+    #[test]
+    fn parses_fader_assignment_payload() {
+        assert_eq!(
+            parse_fader_assignment_payload(&[5, 0, 0, 0]).unwrap(),
+            ChannelName::Chat
+        );
+        assert_eq!(
+            parse_fader_assignment_payload(&[255, 0, 0, 0]).unwrap(),
+            ChannelName::Unknown
+        );
+    }
+
+    #[test]
+    fn parses_mute_state_payload() {
+        assert_eq!(
+            parse_mute_state_payload(&[0, 0]).unwrap(),
+            FaderMuteState::Unmuted
+        );
+        assert_eq!(
+            parse_mute_state_payload(&[1, 0]).unwrap(),
+            FaderMuteState::MutedToX
+        );
+        assert_eq!(
+            parse_mute_state_payload(&[0, 1]).unwrap(),
+            FaderMuteState::MutedToAll
+        );
+        assert_eq!(
+            parse_mute_state_payload(&[1, 1]).unwrap(),
+            FaderMuteState::MutedToAll
+        );
+    }
+
+    #[test]
+    fn parses_mute_function_payload() {
+        assert_eq!(
+            parse_mute_function_payload(&[0]).unwrap(),
+            MuteFunction::All
+        );
+        assert_eq!(
+            parse_mute_function_payload(&[2]).unwrap(),
+            MuteFunction::ToVoiceChat
+        );
+        assert_eq!(
+            parse_mute_function_payload(&[6]).unwrap(),
+            MuteFunction::ToStreams
+        );
+        assert_eq!(
+            parse_mute_function_payload(&[99]).unwrap(),
+            MuteFunction::Unknown
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_mixer_payloads() {
+        assert!(matches!(
+            parse_fader_assignment_payload(&[0, 0, 0]),
+            Err(ProtocolError::MalformedResponse { .. })
+        ));
+        assert!(matches!(
+            parse_mute_state_payload(&[0]),
+            Err(ProtocolError::MalformedResponse { .. })
+        ));
+        assert!(matches!(
+            parse_mute_function_payload(&[]),
+            Err(ProtocolError::MalformedResponse { .. })
+        ));
     }
 
     #[test]
