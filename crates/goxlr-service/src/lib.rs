@@ -548,7 +548,11 @@ mod tests {
         let store = ConfigStore::new(dir.path().join("config.json"));
         let service = AppService::new(store).await.unwrap();
         let snapshot = service.set_mock_device_enabled(true).await.unwrap();
-        let device = &snapshot.devices[0];
+        let device = snapshot
+            .devices
+            .iter()
+            .find(|device| device.identity.is_mock)
+            .expect("mock device should be available");
 
         let snapshot = service
             .set_fader_volume(
@@ -560,7 +564,13 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(snapshot.devices[0].faders[0].volume.unwrap().percent, 25);
+        let mock_device = snapshot
+            .devices
+            .iter()
+            .find(|device| device.identity.is_mock)
+            .expect("mock device should be available");
+
+        assert_eq!(mock_device.faders[0].volume.unwrap().percent, 25);
     }
 
     #[tokio::test]
