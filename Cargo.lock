@@ -1465,6 +1465,7 @@ name = "goxlr-protocol"
 version = "0.1.0"
 dependencies = [
  "goxlr-model",
+ "thiserror 2.0.21",
 ]
 
 [[package]]

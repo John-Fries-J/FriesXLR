@@ -1,4 +1,4 @@
-use goxlr_model::AppSnapshot;
+use goxlr_model::{AppSnapshot, ChannelName, FaderName};
 use goxlr_service::AppService;
 use serde::Serialize;
 use std::sync::{
@@ -80,6 +80,63 @@ pub async fn set_launch_at_startup_enabled(
     state
         .service
         .set_launch_at_startup(enabled)
+        .await
+        .map_err(CommandError::from)
+}
+
+#[tauri::command]
+pub async fn set_selected_device(
+    device_id: Option<String>,
+    state: State<'_, DesktopState>,
+) -> Result<AppSnapshot, CommandError> {
+    state
+        .service
+        .set_selected_device(device_id)
+        .await
+        .map_err(CommandError::from)
+}
+
+#[tauri::command]
+pub async fn set_fader_volume(
+    device_id: String,
+    session_generation: u64,
+    fader: FaderName,
+    percent: u8,
+    state: State<'_, DesktopState>,
+) -> Result<AppSnapshot, CommandError> {
+    state
+        .service
+        .set_fader_volume(device_id, session_generation, fader, percent)
+        .await
+        .map_err(CommandError::from)
+}
+
+#[tauri::command]
+pub async fn set_fader_mute(
+    device_id: String,
+    session_generation: u64,
+    fader: FaderName,
+    muted: bool,
+    state: State<'_, DesktopState>,
+) -> Result<AppSnapshot, CommandError> {
+    state
+        .service
+        .set_fader_mute(device_id, session_generation, fader, muted)
+        .await
+        .map_err(CommandError::from)
+}
+
+#[tauri::command]
+pub async fn set_fader_assignment(
+    device_id: String,
+    session_generation: u64,
+    fader: FaderName,
+    channel: ChannelName,
+    state: State<'_, DesktopState>,
+) -> Result<AppSnapshot, CommandError> {
+    state
+        .service
+        .set_fader_assignment(device_id, session_generation, fader, channel)
         .await
         .map_err(CommandError::from)
 }
