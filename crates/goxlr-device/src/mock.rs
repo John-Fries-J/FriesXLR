@@ -436,6 +436,47 @@ mod tests {
     }
 
     #[test]
+    fn mock_session_reports_assignment_and_mute_events() {
+        let provider = MockDeviceProvider::new(true);
+        let identity = provider.discover().unwrap().devices[0].identity.clone();
+        let mut session = provider.open_session(&identity, 7).unwrap();
+
+        session
+            .set_fader_assignment(FaderName::A, ChannelName::Game)
+            .unwrap();
+        assert_eq!(
+            session.poll_event().unwrap().unwrap(),
+            DeviceEvent::FaderAssignmentChanged {
+                device_id: identity.id.clone(),
+                generation: 7,
+                fader: FaderName::A,
+                channel: Some(ChannelName::Game),
+            }
+        );
+
+        session.set_fader_mute(FaderName::A, true).unwrap();
+        assert_eq!(
+            session.poll_event().unwrap().unwrap(),
+            DeviceEvent::FaderMuteStateChanged {
+                device_id: identity.id.clone(),
+                generation: 7,
+                fader: FaderName::A,
+                mute_state: Some(FaderMuteState::MutedToAll),
+                muted: Some(true),
+            }
+        );
+        assert_eq!(
+            session.poll_event().unwrap().unwrap(),
+            DeviceEvent::FaderMuteButtonChanged {
+                device_id: identity.id,
+                generation: 7,
+                fader: FaderName::A,
+                pressed: true,
+            }
+        );
+    }
+
+    #[test]
     fn mock_session_closes_cleanly() {
         let provider = MockDeviceProvider::new(true);
         let identity = provider.discover().unwrap().devices[0].identity.clone();

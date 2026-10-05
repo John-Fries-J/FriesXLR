@@ -520,6 +520,10 @@ pub enum ServiceError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use goxlr_model::{
+        DeviceCapabilities, DeviceIdentity, DeviceModel, FaderMuteState, VersionNumber,
+    };
+    use std::collections::VecDeque;
 
     #[tokio::test]
     async fn enabling_mock_device_updates_snapshot() {
@@ -540,6 +544,36 @@ mod tests {
             snapshot.selected_device_id.as_deref(),
             Some("mock:goxlr-mini:dev")
         );
+    }
+
+    #[tokio::test]
+    async fn mock_state_initialises_from_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ConfigStore::new(dir.path().join("config.json"));
+        let service = AppService::new(store).await.unwrap();
+        let snapshot = service.set_mock_device_enabled(true).await.unwrap();
+        let device = snapshot
+            .devices
+            .iter()
+            .find(|device| device.identity.is_mock)
+            .expect("mock device should be available");
+
+        assert_eq!(
+            device.identity.serial_number.as_deref(),
+            Some("MOCK-MINI-0001")
+        );
+        assert!(device.identity.firmware_version.is_some());
+        assert!(device.capabilities.readable_fader_assignments);
+        assert!(device.capabilities.writable_fader_volumes);
+        assert_eq!(device.faders.len(), 4);
+        assert_eq!(device.faders[0].assigned_channel, Some(ChannelName::Mic));
+        assert_eq!(device.faders[0].volume.unwrap().raw, 196);
+        assert_eq!(device.faders[0].mute_state, Some(FaderMuteState::Unmuted));
+        assert_eq!(
+            device.faders[0].mute_function,
+            Some(goxlr_model::MuteFunction::All)
+        );
+        assert_eq!(device.faders[0].mute_button_pressed, Some(false));
     }
 
     #[tokio::test]
@@ -593,6 +627,89 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stale_session_events_are_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ConfigStore::new(dir.path().join("config.json"));
+        let service = AppService::new(store).await.unwrap();
+        let device_id = "test:queued".to_string();
+        let generation = 7;
+        let state = queued_state(device_id.clone(), FaderVolume::from_raw(10));
+        let events = VecDeque::from([
+            DeviceEvent::FaderVolumeChanged {
+                device_id: device_id.clone(),
+                generation: generation - 1,
+                fader: FaderName::A,
+                volume: FaderVolume::from_raw(20),
+            },
+            DeviceEvent::FaderVolumeChanged {
+                device_id: device_id.clone(),
+                generation,
+                fader: FaderName::A,
+                volume: FaderVolume::from_raw(30),
+            },
+        ]);
+
+        {
+            let mut runtime = service.runtime.lock().await;
+            runtime.sessions.insert(
+                device_id.clone(),
+                ActiveSession {
+                    session: Box::new(QueuedEventSession {
+                        generation,
+                        state: state.clone(),
+                        events,
+                        closed: false,
+                    }),
+                    state,
+                },
+            );
+            runtime.selected_device_id = Some(device_id.clone());
+        }
+
+        service.poll_sessions_once().await.unwrap();
+        let snapshot = service.snapshot().await;
+        let device = snapshot
+            .devices
+            .iter()
+            .find(|device| device.identity.id == device_id)
+            .unwrap();
+
+        assert_eq!(device.faders[0].volume.unwrap().raw, 30);
+    }
+
+    #[tokio::test]
+    async fn mock_disconnect_and_reconnect_restores_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ConfigStore::new(dir.path().join("config.json"));
+        let service = AppService::new(store).await.unwrap();
+        let snapshot = service.set_mock_device_enabled(true).await.unwrap();
+        let first_generation = snapshot
+            .devices
+            .iter()
+            .find(|device| device.identity.is_mock)
+            .unwrap()
+            .session_generation
+            .unwrap();
+
+        let snapshot = service.set_mock_device_enabled(false).await.unwrap();
+        assert!(snapshot
+            .devices
+            .iter()
+            .all(|device| !device.identity.is_mock));
+
+        let snapshot = service.set_mock_device_enabled(true).await.unwrap();
+        let mock = snapshot
+            .devices
+            .iter()
+            .find(|device| device.identity.is_mock)
+            .unwrap();
+
+        assert!(mock.session_generation.unwrap() > first_generation);
+        assert_eq!(mock.faders[0].assigned_channel, Some(ChannelName::Mic));
+        assert!(mock.faders[0].volume.is_some());
+    }
+
+    #[tokio::test]
     async fn selected_device_can_be_changed() {
         let dir = tempfile::tempdir().unwrap();
         let store = ConfigStore::new(dir.path().join("config.json"));
@@ -627,5 +744,70 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
+    }
+
+    struct QueuedEventSession {
+        generation: SessionGeneration,
+        state: DeviceSessionState,
+        events: VecDeque<DeviceEvent>,
+        closed: bool,
+    }
+
+    impl DeviceSession for QueuedEventSession {
+        fn generation(&self) -> SessionGeneration {
+            self.generation
+        }
+
+        fn current_state(&self) -> Result<DeviceSessionState, DeviceError> {
+            if self.closed {
+                return Err(DeviceError::SessionClosed);
+            }
+
+            Ok(self.state.clone())
+        }
+
+        fn poll_event(&mut self) -> Result<Option<DeviceEvent>, DeviceError> {
+            Ok(self.events.pop_front())
+        }
+
+        fn close(&mut self) {
+            self.closed = true;
+        }
+    }
+
+    fn queued_state(device_id: String, volume: FaderVolume) -> DeviceSessionState {
+        DeviceSessionState {
+            identity: DeviceIdentity {
+                id: device_id,
+                model: DeviceModel::GoXlrMini,
+                vendor_id: None,
+                product_id: None,
+                manufacturer_name: Some("Test".to_string()),
+                product_name: Some("Queued Session".to_string()),
+                serial_number: Some("TEST-1".to_string()),
+                firmware_version: Some(VersionNumber {
+                    major: 1,
+                    minor: 0,
+                    patch: None,
+                    build: None,
+                }),
+                driver_interface: Some("test".to_string()),
+                driver_version: None,
+                is_mock: true,
+            },
+            capabilities: DeviceCapabilities::mock(),
+            faders: FaderName::ALL
+                .into_iter()
+                .map(|name| FaderState {
+                    name,
+                    assigned_channel: Some(ChannelName::Mic),
+                    volume: Some(volume),
+                    mute_state: Some(FaderMuteState::Unmuted),
+                    mute_function: Some(goxlr_model::MuteFunction::All),
+                    muted: Some(false),
+                    mute_button_pressed: Some(false),
+                })
+                .collect(),
+        }
     }
 }
