@@ -12,7 +12,8 @@ export function DashboardView() {
     return <EmptyState />;
   }
 
-  const primary = devices[0];
+  const primary =
+    devices.find((device) => device.identity.id === snapshot?.selectedDeviceId) ?? devices[0];
 
   return (
     <section className="dashboard">
@@ -43,4 +44,3 @@ export function DashboardView() {
     </section>
   );
 }
-

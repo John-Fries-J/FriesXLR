@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { formatChannel, formatDeviceModel, formatVersion } from "./format";
+import {
+  formatChannel,
+  formatDeviceModel,
+  formatMuteFunction,
+  formatMuteState,
+  formatVersion
+} from "./format";
 
 describe("device formatting", () => {
   it("formats device models", () => {
@@ -16,5 +22,15 @@ describe("device formatting", () => {
     expect(formatChannel("lineIn")).toBe("Line In");
     expect(formatChannel(undefined)).toBe("Unknown");
   });
-});
 
+  it("formats mute states", () => {
+    expect(formatMuteState("mutedToAll")).toBe("Muted");
+    expect(formatMuteState(null)).toBe("Unavailable");
+  });
+
+  it("formats mute functions", () => {
+    expect(formatMuteFunction("all")).toBe("Mute all");
+    expect(formatMuteFunction("toVoiceChat")).toBe("Mute to voice chat");
+    expect(formatMuteFunction(null)).toBe("Unavailable");
+  });
+});
