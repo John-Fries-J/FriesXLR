@@ -237,7 +237,10 @@ pub fn mute_state_from_profile_flags(muted_to_x: bool, muted_to_all: bool) -> Fa
 pub fn parse_mute_state_payload(response: &[u8]) -> Result<FaderMuteState, ProtocolError> {
     if response.len() < 2 {
         return Err(ProtocolError::MalformedResponse {
-            reason: format!("mute state payload shorter than 2 bytes: {}", response.len()),
+            reason: format!(
+                "mute state payload shorter than 2 bytes: {}",
+                response.len()
+            ),
         });
     }
 
