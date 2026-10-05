@@ -17,10 +17,14 @@ use goxlr_protocol::{
 };
 use libloading::Library;
 use std::collections::VecDeque;
-use std::ffi::CStr;
+use std::ffi::{c_void, CStr};
 use std::path::PathBuf;
-use std::sync::Arc;
-use std::thread::sleep;
+use std::ptr::{null, null_mut};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    mpsc, Arc,
+};
+use std::thread::{self, sleep, JoinHandle};
 use std::time::{Duration, Instant};
 use tracing::{debug, info, trace, warn};
 use winreg::enums::HKEY_CLASSES_ROOT;
@@ -36,11 +40,28 @@ type VendorRequestOut =
     unsafe extern "C" fn(u32, u32, u32, u32, u32, u16, u16, *const u8, *mut u8, u32) -> u32;
 type VendorRequestIn =
     unsafe extern "C" fn(u32, u32, u32, u32, u32, u16, u16, *mut u8, *mut u8, u32) -> u32;
+type RawEventHandle = *mut c_void;
+type RegisterDeviceNotification = unsafe extern "C" fn(u32, u32, RawEventHandle, u32) -> u32;
+type ReadDeviceNotification = unsafe extern "C" fn(u32, *const u32, *mut u8, u32, *mut u32) -> u32;
 type StatusCodeString = unsafe extern "C" fn(u32) -> *const i8;
 type CloseDevice = unsafe extern "C" fn(u32) -> u32;
 
 const MIXER_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(1);
+const WAIT_TIMEOUT: u32 = 0x0000_0102;
+const TSTATUS_NO_MORE_NOTIFICATIONS: u32 = 3_992_977_442;
+
+#[link(name = "kernel32")]
+extern "system" {
+    fn CreateEventW(
+        event_attributes: *mut c_void,
+        manual_reset: i32,
+        initial_state: i32,
+        name: *const u16,
+    ) -> RawEventHandle;
+    fn WaitForSingleObject(handle: RawEventHandle, milliseconds: u32) -> u32;
+    fn CloseHandle(handle: RawEventHandle) -> i32;
+}
 
 #[derive(Debug)]
 pub struct WindowsDeviceProvider {
@@ -118,6 +139,8 @@ struct TusbApi {
     get_device_properties: GetDeviceProperties,
     vendor_request_out: VendorRequestOut,
     vendor_request_in: VendorRequestIn,
+    register_device_notification: Option<RegisterDeviceNotification>,
+    read_device_notification: Option<ReadDeviceNotification>,
     status_code_string: StatusCodeString,
     close_device: CloseDevice,
 }
@@ -156,6 +179,14 @@ impl TusbApi {
                 vendor_request_in: *library
                     .get::<VendorRequestIn>(b"TUSBAUDIO_ClassVendorRequestIn")
                     .map_err(|error| DeviceError::DriverUnavailable(error.to_string()))?,
+                register_device_notification: library
+                    .get::<RegisterDeviceNotification>(b"TUSBAUDIO_RegisterDeviceNotification")
+                    .map(|symbol| *symbol)
+                    .ok(),
+                read_device_notification: library
+                    .get::<ReadDeviceNotification>(b"TUSBAUDIO_ReadDeviceNotification")
+                    .map(|symbol| *symbol)
+                    .ok(),
                 status_code_string: *library
                     .get::<StatusCodeString>(b"TUSBAUDIO_StatusCodeStringA")
                     .map_err(|error| DeviceError::DriverUnavailable(error.to_string()))?,
@@ -349,6 +380,69 @@ impl TusbApi {
         Ok(buffer)
     }
 
+    fn register_input_notification(
+        &self,
+        handle: u32,
+        event: RawEventHandle,
+    ) -> Result<(), DeviceError> {
+        let register = self.register_device_notification.ok_or_else(|| {
+            DeviceError::UnsupportedOperation(
+                "TUSBAUDIO input notifications are not available".to_string(),
+            )
+        })?;
+
+        let result = unsafe { register(handle, u32::MAX, event, 0) };
+        if result != 0 {
+            return Err(self.control_error(result));
+        }
+
+        Ok(())
+    }
+
+    fn read_input_notification(&self, handle: u32) -> Result<Option<Vec<u8>>, DeviceError> {
+        let read = self.read_device_notification.ok_or_else(|| {
+            DeviceError::UnsupportedOperation(
+                "TUSBAUDIO input notifications are not available".to_string(),
+            )
+        })?;
+
+        let mut buffer = vec![0_u8; 1024];
+        let mut response_len = 0_u32;
+        let notification_type = 0_u32;
+        let result = unsafe {
+            read(
+                handle,
+                &notification_type,
+                buffer.as_mut_ptr(),
+                buffer.len() as u32,
+                &mut response_len,
+            )
+        };
+
+        if result == TSTATUS_NO_MORE_NOTIFICATIONS {
+            return Ok(None);
+        }
+
+        if result != 0 {
+            return Err(self.control_error(result));
+        }
+
+        let len = response_len as usize;
+        if len > buffer.len() {
+            return Err(DeviceError::MalformedResponse(format!(
+                "driver reported {len} notification bytes for {}-byte buffer",
+                buffer.len()
+            )));
+        }
+
+        buffer.truncate(len);
+        Ok(Some(buffer))
+    }
+
+    fn supports_input_notifications(&self) -> bool {
+        self.register_device_notification.is_some() && self.read_device_notification.is_some()
+    }
+
     fn close_handle(&self, handle: u32) {
         let result = unsafe { (self.close_device)(handle) };
         if result != 0 {
@@ -414,8 +508,17 @@ struct TusbDeviceSession {
     command_index: CommandIndex,
     last_button_state: ButtonStateSnapshot,
     pending_events: VecDeque<DeviceEvent>,
+    input_notifications: Option<mpsc::Receiver<InputNotification>>,
+    notification_stop: Option<Arc<AtomicBool>>,
+    notification_thread: Option<JoinHandle<()>>,
     last_poll: Instant,
     closed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum InputNotification {
+    Changed,
+    Unavailable(String),
 }
 
 impl TusbDeviceSession {
@@ -438,6 +541,9 @@ impl TusbDeviceSession {
                 encoders: [0; 4],
             },
             pending_events: VecDeque::new(),
+            input_notifications: None,
+            notification_stop: None,
+            notification_thread: None,
             last_poll: Instant::now(),
             closed: false,
         };
@@ -460,6 +566,7 @@ impl TusbDeviceSession {
 
         session.identity = identity;
         session.last_button_state = session.read_button_state()?;
+        session.start_input_notifications();
 
         info!(
             device_id = %session.identity.id,
@@ -501,6 +608,104 @@ impl TusbDeviceSession {
     fn read_button_state(&mut self) -> Result<ButtonStateSnapshot, DeviceError> {
         let response = self.request(ProtocolCommand::GetButtonStates, &[])?;
         Ok(parse_button_state_response(&response)?)
+    }
+
+    fn start_input_notifications(&mut self) {
+        if !self.api.supports_input_notifications() {
+            debug!(
+                device_id = %self.identity.id,
+                "TUSBAUDIO input notifications unavailable; using timed status polling"
+            );
+            return;
+        }
+
+        let (sender, receiver) = mpsc::channel();
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread_stop = stop.clone();
+        let api = self.api.clone();
+        let identifier = self.identity.id.clone();
+
+        let thread = thread::spawn(move || {
+            if let Err(error) =
+                run_input_notification_loop(api, identifier, sender.clone(), thread_stop)
+            {
+                let _ = sender.send(InputNotification::Unavailable(error.to_string()));
+            }
+        });
+
+        self.input_notifications = Some(receiver);
+        self.notification_stop = Some(stop);
+        self.notification_thread = Some(thread);
+    }
+
+    fn stop_input_notifications(&mut self) {
+        if let Some(stop) = &self.notification_stop {
+            stop.store(true, Ordering::Relaxed);
+        }
+
+        if let Some(thread) = self.notification_thread.take() {
+            if let Err(error) = thread.join() {
+                warn!(?error, "TUSBAUDIO input notification thread panicked");
+            }
+        }
+
+        self.notification_stop = None;
+        self.input_notifications = None;
+    }
+
+    fn process_input_notifications(&mut self) -> Result<bool, DeviceError> {
+        let Some(receiver) = &self.input_notifications else {
+            return Ok(false);
+        };
+
+        let mut changed = false;
+        let mut disable_notifications = None;
+
+        loop {
+            match receiver.try_recv() {
+                Ok(InputNotification::Changed) => changed = true,
+                Ok(InputNotification::Unavailable(error)) => {
+                    disable_notifications = Some(error);
+                    break;
+                }
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    disable_notifications =
+                        Some("TUSBAUDIO input notification thread stopped".to_string());
+                    break;
+                }
+            }
+        }
+
+        if let Some(error) = disable_notifications {
+            debug!(
+                device_id = %self.identity.id,
+                %error,
+                "TUSBAUDIO input notifications disabled; falling back to timed status polling"
+            );
+            self.stop_input_notifications();
+            return Ok(false);
+        }
+
+        if !changed {
+            return Ok(false);
+        }
+
+        match self.read_button_state() {
+            Ok(next) => {
+                self.enqueue_button_state_events(&next);
+                Ok(true)
+            }
+            Err(DeviceError::DeviceDisconnected) => {
+                self.closed = true;
+                self.pending_events.push_back(DeviceEvent::Disconnected {
+                    device_id: self.identity.id.clone(),
+                    generation: self.generation,
+                });
+                Ok(true)
+            }
+            Err(error) => Err(error),
+        }
     }
 
     fn request(&mut self, command: ProtocolCommand, body: &[u8]) -> Result<Vec<u8>, DeviceError> {
@@ -634,6 +839,14 @@ impl DeviceSession for TusbDeviceSession {
             return Ok(Some(event));
         }
 
+        if self.process_input_notifications()? {
+            return Ok(self.pending_events.pop_front());
+        }
+
+        if self.input_notifications.is_some() {
+            return Ok(None);
+        }
+
         if self.last_poll.elapsed() < MIXER_POLL_INTERVAL {
             return Ok(None);
         }
@@ -656,6 +869,8 @@ impl DeviceSession for TusbDeviceSession {
     }
 
     fn close(&mut self) {
+        self.stop_input_notifications();
+
         if let Some(handle) = self.handle.take() {
             self.api.close_handle(handle);
         }
@@ -667,6 +882,76 @@ impl Drop for TusbDeviceSession {
     fn drop(&mut self) {
         self.close();
     }
+}
+
+fn run_input_notification_loop(
+    api: Arc<TusbApi>,
+    identifier: String,
+    sender: mpsc::Sender<InputNotification>,
+    stop: Arc<AtomicBool>,
+) -> Result<(), DeviceError> {
+    let event = unsafe { CreateEventW(null_mut(), 0, 0, null()) };
+    if event.is_null() {
+        return Err(DeviceError::DriverUnavailable(
+            "CreateEventW returned a null event handle".to_string(),
+        ));
+    }
+    let _event = CloseEventOnDrop { event };
+
+    let handle = api.open_device_by_identifier(&identifier)?;
+    let _close = CloseHandleOnDrop {
+        handle,
+        close_device: api.close_device,
+    };
+
+    api.register_input_notification(handle, event)?;
+    debug!(device_id = %identifier, "TUSBAUDIO input notifications registered");
+
+    while !stop.load(Ordering::Relaxed) {
+        let wait_result = unsafe { WaitForSingleObject(event, 500) };
+        if wait_result == WAIT_TIMEOUT {
+            continue;
+        }
+
+        while let Some(notification) = api.read_input_notification(handle)? {
+            if notification.is_empty() {
+                continue;
+            }
+
+            if is_input_changed_notification(&notification) {
+                if sender.send(InputNotification::Changed).is_err() {
+                    return Ok(());
+                }
+            } else if !is_data_ready_notification(&notification) {
+                debug!(
+                    device_id = %identifier,
+                    len = notification.len(),
+                    ?notification,
+                    "ignored unexpected TUSBAUDIO notification"
+                );
+            }
+        }
+    }
+
+    Ok(())
+}
+
+struct CloseEventOnDrop {
+    event: RawEventHandle,
+}
+
+impl Drop for CloseEventOnDrop {
+    fn drop(&mut self) {
+        let _ = unsafe { CloseHandle(self.event) };
+    }
+}
+
+fn is_input_changed_notification(response: &[u8]) -> bool {
+    response.len() == 6 && response[0] == 1 && response[1] == 1 && response[2] == 0
+}
+
+fn is_data_ready_notification(response: &[u8]) -> bool {
+    response.len() == 6 && response[0] == 1 && response[1] == 1 && response[2] == 1
 }
 
 #[repr(C)]
@@ -753,5 +1038,19 @@ mod tests {
         let input = ['G' as u16, 'o' as u16, 'X' as u16, 0, 'x' as u16];
 
         assert_eq!(wide_to_string(&input), Some("GoX".to_string()));
+    }
+
+    #[test]
+    fn parses_tusb_input_notifications() {
+        assert!(is_input_changed_notification(&[1, 1, 0, 0, 0, 0]));
+        assert!(!is_input_changed_notification(&[1, 1, 1, 0, 0, 0]));
+        assert!(!is_input_changed_notification(&[1, 1, 0]));
+    }
+
+    #[test]
+    fn parses_tusb_data_ready_notifications() {
+        assert!(is_data_ready_notification(&[1, 1, 1, 0, 0, 0]));
+        assert!(!is_data_ready_notification(&[1, 1, 0, 0, 0, 0]));
+        assert!(!is_data_ready_notification(&[1, 1, 1]));
     }
 }
