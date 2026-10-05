@@ -46,6 +46,31 @@ The constants used for identifying devices are:
 Those constants and the Windows TUSBAUDIO discovery function names are adapted
 from GoXLR Utility under MIT attribution.
 
+## Phase 2A Read-Only Mixer State
+
+The Windows physical session opens a persistent TUSBAUDIO handle, activates the
+vendor pipe, and reads serial number, firmware version, and the lightweight
+`GetButtonStates` status. `GetButtonStates` is the only direct hardware status
+query used during normal read-only mixer updates. It provides:
+
+- four physical fader raw positions
+- currently pressed button bits, including the four fader mute buttons
+- encoder deltas, which FriesXLR currently ignores
+
+When the installed TUSBAUDIO DLL exposes device notification functions,
+FriesXLR registers for input-change notifications and only rereads
+`GetButtonStates` after a button/fader interrupt. If those notification
+functions are unavailable or fail, FriesXLR falls back to a 50 ms poll of
+`GetButtonStates`. The fallback is intentionally limited to that small status
+command; FriesXLR does not query full device/profile state every 50 ms.
+
+GoXLR Utility models fader assignment, mute function, and latched fader mute
+state from its loaded profile state. Its direct hardware input monitoring uses
+`GetButtonStates` for physical fader positions and button down/up transitions.
+FriesXLR therefore keeps direct physical fader assignment, mute function, and
+latched mute state unknown until a verified profile/state source is available.
+This avoids inventing defaults or issuing unverified protocol requests.
+
 ## State Flow
 
 `AppService` periodically refreshes the configured provider set, produces a new
