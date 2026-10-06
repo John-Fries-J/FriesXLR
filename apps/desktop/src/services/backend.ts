@@ -1,6 +1,16 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import type { AppSnapshot, ChannelName, FaderName } from "../types/backend";
+import type {
+  AppSnapshot,
+  ChannelName,
+  CompressorState,
+  DeEsserState,
+  EqBandId,
+  FaderName,
+  MicrophoneType,
+  NoiseGateState,
+  RoutingRoute
+} from "../types/backend";
 
 export const SNAPSHOT_EVENT = "friesxlr://snapshot";
 
@@ -63,6 +73,100 @@ export function setFaderAssignment(
     sessionGeneration,
     fader,
     channel
+  });
+}
+
+export function setRoutingRoute(
+  deviceId: string,
+  sessionGeneration: number,
+  route: RoutingRoute,
+  enabled: boolean
+) {
+  return invoke<AppSnapshot>("set_routing_route", {
+    deviceId,
+    sessionGeneration,
+    route,
+    enabled
+  });
+}
+
+export function setMicrophoneType(
+  deviceId: string,
+  sessionGeneration: number,
+  microphoneType: MicrophoneType,
+  confirmPhantomPower: boolean
+) {
+  return invoke<AppSnapshot>("set_microphone_type", {
+    deviceId,
+    sessionGeneration,
+    microphoneType,
+    confirmPhantomPower
+  });
+}
+
+export function setMicrophoneGain(
+  deviceId: string,
+  sessionGeneration: number,
+  microphoneType: MicrophoneType,
+  gainDb: number
+) {
+  return invoke<AppSnapshot>("set_microphone_gain", {
+    deviceId,
+    sessionGeneration,
+    microphoneType,
+    gainDb
+  });
+}
+
+export function setEqualizerBand(
+  deviceId: string,
+  sessionGeneration: number,
+  bandId: EqBandId,
+  frequencyTenthsHz: number,
+  gainDb: number
+) {
+  return invoke<AppSnapshot>("set_equalizer_band", {
+    deviceId,
+    sessionGeneration,
+    bandId,
+    frequencyTenthsHz,
+    gainDb
+  });
+}
+
+export function setNoiseGate(
+  deviceId: string,
+  sessionGeneration: number,
+  gate: NoiseGateState
+) {
+  return invoke<AppSnapshot>("set_noise_gate", {
+    deviceId,
+    sessionGeneration,
+    gate
+  });
+}
+
+export function setCompressor(
+  deviceId: string,
+  sessionGeneration: number,
+  compressor: CompressorState
+) {
+  return invoke<AppSnapshot>("set_compressor", {
+    deviceId,
+    sessionGeneration,
+    compressor
+  });
+}
+
+export function setDeEsser(
+  deviceId: string,
+  sessionGeneration: number,
+  deEsser: DeEsserState
+) {
+  return invoke<AppSnapshot>("set_de_esser", {
+    deviceId,
+    sessionGeneration,
+    deEsser
   });
 }
 

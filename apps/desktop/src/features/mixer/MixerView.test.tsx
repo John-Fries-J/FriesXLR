@@ -1,21 +1,16 @@
 import { render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
 import { useDeviceStore } from "../../stores/deviceStore";
-import type { AppSnapshot, DeviceCapabilities, DeviceState } from "../../types/backend";
+import { device, phase3Capabilities, snapshot } from "../../test/fixtures";
+import type { DeviceCapabilities } from "../../types/backend";
 import { MixerView } from "./MixerView";
 
 const writableCapabilities: DeviceCapabilities = {
-  readableFaderAssignments: true,
-  readableFaderVolumes: true,
-  readableFaderMuteState: true,
-  readableFaderButtonState: true,
-  writableFaderVolumes: true,
-  writableFaderMuteState: true,
-  writableFaderAssignments: true,
-  supportedAssignmentChannels: ["mic", "chat", "music", "system"]
+  ...phase3Capabilities(true)
 };
 
 const readOnlyCapabilities: DeviceCapabilities = {
+  ...phase3Capabilities(false),
   readableFaderAssignments: false,
   readableFaderVolumes: true,
   readableFaderMuteState: false,
@@ -50,7 +45,15 @@ describe("MixerView", () => {
   });
 
   it("renders unavailable controls without fake values", () => {
-    const selected = device("real:1", readOnlyCapabilities, true);
+    const selected = device("real:1", readOnlyCapabilities);
+    selected.identity.model = "goXlr";
+    selected.identity.vendorId = 0x1220;
+    selected.identity.productId = 0x8fe0;
+    selected.identity.manufacturerName = "TC-Helicon";
+    selected.identity.productName = "GoXLR";
+    selected.identity.serialNumber = "REAL-1";
+    selected.identity.driverInterface = "tusb";
+    selected.identity.isMock = false;
     selected.faders[0].assignedChannel = null;
     selected.faders[0].volume = null;
     selected.faders[0].muted = null;
@@ -89,86 +92,3 @@ describe("MixerView", () => {
     expect(screen.getByText("MOCK-2")).toBeInTheDocument();
   });
 });
-
-function snapshot(
-  device: DeviceState,
-  devices: DeviceState[] = [device],
-  selectedDeviceId = device.identity.id
-): AppSnapshot {
-  return {
-    settings: {
-      mockDeviceEnabled: true,
-      showTrayIcon: true,
-      startMinimized: false,
-      launchAtStartup: false,
-      logLevel: "info",
-      configPath: null
-    },
-    service: {
-      running: true,
-      lastError: null
-    },
-    devices,
-    selectedDeviceId
-  };
-}
-
-function device(
-  id: string,
-  capabilities: DeviceCapabilities,
-  real = false
-): DeviceState {
-  return {
-    identity: {
-      id,
-      model: real ? "goXlr" : "goXlrMini",
-      vendorId: real ? 0x1220 : null,
-      productId: real ? 0x8fe0 : null,
-      manufacturerName: real ? "TC-Helicon" : "FriesXLR",
-      productName: real ? "GoXLR" : "Mock GoXLR Mini",
-      serialNumber: real ? "REAL-1" : "MOCK-1",
-      firmwareVersion: null,
-      driverInterface: real ? "tusb" : "mock",
-      driverVersion: null,
-      isMock: !real
-    },
-    status: "connected",
-    capabilities,
-    sessionGeneration: 1,
-    lastSeenEpochMs: 1,
-    faders: [
-      {
-        name: "A",
-        assignedChannel: "mic",
-        volume: { raw: 128, percent: 50 },
-        muteState: "unmuted",
-        muted: false,
-        muteButtonPressed: false
-      },
-      {
-        name: "B",
-        assignedChannel: "chat",
-        volume: { raw: 64, percent: 25 },
-        muteState: "unmuted",
-        muted: false,
-        muteButtonPressed: false
-      },
-      {
-        name: "C",
-        assignedChannel: "music",
-        volume: { raw: 200, percent: 78 },
-        muteState: "mutedToAll",
-        muted: true,
-        muteButtonPressed: true
-      },
-      {
-        name: "D",
-        assignedChannel: "system",
-        volume: { raw: 255, percent: 100 },
-        muteState: "unmuted",
-        muted: false,
-        muteButtonPressed: false
-      }
-    ]
-  };
-}

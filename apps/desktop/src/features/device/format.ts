@@ -1,8 +1,12 @@
 import type {
   ChannelName,
   DeviceModel,
+  EqBandId,
   FaderMuteState,
+  MicrophoneType,
   MuteFunction,
+  RoutingInput,
+  RoutingOutput,
   VersionNumber
 } from "../../types/backend";
 
@@ -92,4 +96,77 @@ export function formatMuteFunction(muteFunction?: MuteFunction | null) {
     default:
       return "Unavailable";
   }
+}
+
+export function formatRoutingInput(input: RoutingInput) {
+  const labels: Record<RoutingInput, string> = {
+    microphone: "Mic",
+    chat: "Chat",
+    music: "Music",
+    game: "Game",
+    console: "Console",
+    lineIn: "Line In",
+    system: "System",
+    sample: "Sample"
+  };
+
+  return labels[input];
+}
+
+export function formatRoutingOutput(output: RoutingOutput) {
+  const labels: Record<RoutingOutput, string> = {
+    headphones: "Headphones",
+    broadcastMix: "Broadcast Mix",
+    chatMic: "Chat Mic",
+    sampler: "Sampler",
+    lineOut: "Line Out",
+    streamMix2: "Stream Mix 2"
+  };
+
+  return labels[output];
+}
+
+export function formatMicrophoneType(type: MicrophoneType) {
+  const labels: Record<MicrophoneType, string> = {
+    dynamic: "Dynamic",
+    condenser: "Condenser",
+    jack: "3.5mm"
+  };
+
+  return labels[type];
+}
+
+export function formatFrequency(tenthsHz: number) {
+  const hz = tenthsHz / 10;
+  if (hz >= 1000) {
+    return `${Number((hz / 1000).toFixed(1))} kHz`;
+  }
+  return `${Number(hz.toFixed(1))} Hz`;
+}
+
+export function formatRatio(ratioTenths: number) {
+  return `${Number((ratioTenths / 10).toFixed(1))}:1`;
+}
+
+export function formatEqBand(id: EqBandId) {
+  const labels: Record<EqBandId, string> = {
+    eq31Hz: "31 Hz",
+    eq63Hz: "63 Hz",
+    eq125Hz: "125 Hz",
+    eq250Hz: "250 Hz",
+    eq500Hz: "500 Hz",
+    eq1KHz: "1 kHz",
+    eq2KHz: "2 kHz",
+    eq4KHz: "4 kHz",
+    eq8KHz: "8 kHz",
+    eq16KHz: "16 kHz",
+    miniEq90Hz: "90 Hz",
+    miniEq250Hz: "250 Hz",
+    miniEq500Hz: "500 Hz",
+    miniEq1KHz: "1 kHz",
+    miniEq3KHz: "3 kHz",
+    miniEq8KHz: "8 kHz"
+  };
+
+  return labels[id];
 }

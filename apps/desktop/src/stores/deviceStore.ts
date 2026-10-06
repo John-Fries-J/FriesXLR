@@ -2,15 +2,32 @@ import { create } from "zustand";
 import {
   getSnapshot,
   quitApplication as quitApplicationCommand,
+  setCompressor as setCompressorCommand,
+  setDeEsser as setDeEsserCommand,
+  setEqualizerBand as setEqualizerBandCommand,
   setFaderAssignment as setFaderAssignmentCommand,
   setFaderMute as setFaderMuteCommand,
   setFaderVolume as setFaderVolumeCommand,
   setLaunchAtStartupEnabled as setLaunchAtStartupEnabledCommand,
+  setMicrophoneGain as setMicrophoneGainCommand,
+  setMicrophoneType as setMicrophoneTypeCommand,
   setMockDeviceEnabled as setMockDeviceEnabledCommand,
+  setNoiseGate as setNoiseGateCommand,
+  setRoutingRoute as setRoutingRouteCommand,
   setSelectedDevice as setSelectedDeviceCommand,
   setStartMinimized as setStartMinimizedCommand
 } from "../services/backend";
-import type { AppSnapshot, ChannelName, FaderName } from "../types/backend";
+import type {
+  AppSnapshot,
+  ChannelName,
+  CompressorState,
+  DeEsserState,
+  EqBandId,
+  FaderName,
+  MicrophoneType,
+  NoiseGateState,
+  RoutingRoute
+} from "../types/backend";
 
 interface DeviceStore {
   snapshot: AppSnapshot | null;
@@ -39,6 +56,46 @@ interface DeviceStore {
     sessionGeneration: number,
     fader: FaderName,
     channel: ChannelName
+  ) => Promise<void>;
+  setRoutingRoute: (
+    deviceId: string,
+    sessionGeneration: number,
+    route: RoutingRoute,
+    enabled: boolean
+  ) => Promise<void>;
+  setMicrophoneType: (
+    deviceId: string,
+    sessionGeneration: number,
+    microphoneType: MicrophoneType,
+    confirmPhantomPower: boolean
+  ) => Promise<void>;
+  setMicrophoneGain: (
+    deviceId: string,
+    sessionGeneration: number,
+    microphoneType: MicrophoneType,
+    gainDb: number
+  ) => Promise<void>;
+  setEqualizerBand: (
+    deviceId: string,
+    sessionGeneration: number,
+    bandId: EqBandId,
+    frequencyTenthsHz: number,
+    gainDb: number
+  ) => Promise<void>;
+  setNoiseGate: (
+    deviceId: string,
+    sessionGeneration: number,
+    gate: NoiseGateState
+  ) => Promise<void>;
+  setCompressor: (
+    deviceId: string,
+    sessionGeneration: number,
+    compressor: CompressorState
+  ) => Promise<void>;
+  setDeEsser: (
+    deviceId: string,
+    sessionGeneration: number,
+    deEsser: DeEsserState
   ) => Promise<void>;
   quitApplication: () => Promise<void>;
 }
@@ -130,6 +187,105 @@ export const useDeviceStore = create<DeviceStore>((set) => ({
         fader,
         channel
       );
+      set({ snapshot });
+    } catch (error) {
+      set({ error: errorMessage(error) });
+    }
+  },
+  setRoutingRoute: async (deviceId, sessionGeneration, route, enabled) => {
+    set({ error: null });
+    try {
+      const snapshot = await setRoutingRouteCommand(
+        deviceId,
+        sessionGeneration,
+        route,
+        enabled
+      );
+      set({ snapshot });
+    } catch (error) {
+      set({ error: errorMessage(error) });
+    }
+  },
+  setMicrophoneType: async (
+    deviceId,
+    sessionGeneration,
+    microphoneType,
+    confirmPhantomPower
+  ) => {
+    set({ error: null });
+    try {
+      const snapshot = await setMicrophoneTypeCommand(
+        deviceId,
+        sessionGeneration,
+        microphoneType,
+        confirmPhantomPower
+      );
+      set({ snapshot });
+    } catch (error) {
+      set({ error: errorMessage(error) });
+    }
+  },
+  setMicrophoneGain: async (deviceId, sessionGeneration, microphoneType, gainDb) => {
+    set({ error: null });
+    try {
+      const snapshot = await setMicrophoneGainCommand(
+        deviceId,
+        sessionGeneration,
+        microphoneType,
+        gainDb
+      );
+      set({ snapshot });
+    } catch (error) {
+      set({ error: errorMessage(error) });
+    }
+  },
+  setEqualizerBand: async (
+    deviceId,
+    sessionGeneration,
+    bandId,
+    frequencyTenthsHz,
+    gainDb
+  ) => {
+    set({ error: null });
+    try {
+      const snapshot = await setEqualizerBandCommand(
+        deviceId,
+        sessionGeneration,
+        bandId,
+        frequencyTenthsHz,
+        gainDb
+      );
+      set({ snapshot });
+    } catch (error) {
+      set({ error: errorMessage(error) });
+    }
+  },
+  setNoiseGate: async (deviceId, sessionGeneration, gate) => {
+    set({ error: null });
+    try {
+      const snapshot = await setNoiseGateCommand(deviceId, sessionGeneration, gate);
+      set({ snapshot });
+    } catch (error) {
+      set({ error: errorMessage(error) });
+    }
+  },
+  setCompressor: async (deviceId, sessionGeneration, compressor) => {
+    set({ error: null });
+    try {
+      const snapshot = await setCompressorCommand(
+        deviceId,
+        sessionGeneration,
+        compressor
+      );
+      set({ snapshot });
+    } catch (error) {
+      set({ error: errorMessage(error) });
+    }
+  },
+  setDeEsser: async (deviceId, sessionGeneration, deEsser) => {
+    set({ error: null });
+    try {
+      const snapshot = await setDeEsserCommand(deviceId, sessionGeneration, deEsser);
       set({ snapshot });
     } catch (error) {
       set({ error: errorMessage(error) });
