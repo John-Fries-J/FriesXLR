@@ -3,7 +3,8 @@ mod logging;
 mod tray;
 
 use commands::{
-    get_snapshot, quit_application, set_launch_at_startup_enabled, set_mock_device_enabled,
+    get_snapshot, quit_application, set_fader_assignment, set_fader_mute, set_fader_volume,
+    set_launch_at_startup_enabled, set_mock_device_enabled, set_selected_device,
     set_start_minimized, DesktopState,
 };
 use goxlr_profile::{AppConfig, ConfigStore};
@@ -73,6 +74,10 @@ pub fn run() {
             set_mock_device_enabled,
             set_start_minimized,
             set_launch_at_startup_enabled,
+            set_selected_device,
+            set_fader_volume,
+            set_fader_mute,
+            set_fader_assignment,
             quit_application
         ])
         .run(tauri::generate_context!())

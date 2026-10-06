@@ -17,6 +17,18 @@ export type ChannelName =
   | "lineOut"
   | "unknown";
 
+export type MuteFunction =
+  | "all"
+  | "toStream"
+  | "toVoiceChat"
+  | "toPhones"
+  | "toLineOut"
+  | "toStream2"
+  | "toStreams"
+  | "unknown";
+
+export type FaderMuteState = "unmuted" | "mutedToX" | "mutedToAll" | "unknown";
+
 export interface VersionNumber {
   major: number;
   minor: number;
@@ -38,18 +50,39 @@ export interface DeviceIdentity {
   isMock: boolean;
 }
 
+export interface FaderVolume {
+  raw: number;
+  percent: number;
+}
+
+export interface DeviceCapabilities {
+  readableFaderAssignments: boolean;
+  readableFaderVolumes: boolean;
+  readableFaderMuteState: boolean;
+  readableFaderButtonState: boolean;
+  writableFaderVolumes: boolean;
+  writableFaderMuteState: boolean;
+  writableFaderAssignments: boolean;
+  supportedAssignmentChannels: ChannelName[];
+}
+
 export interface FaderState {
   name: FaderName;
   assignedChannel?: ChannelName | null;
-  volume?: number | null;
+  volume?: FaderVolume | null;
+  muteState?: FaderMuteState | null;
+  muteFunction?: MuteFunction | null;
   muted?: boolean | null;
+  muteButtonPressed?: boolean | null;
 }
 
 export interface DeviceState {
   identity: DeviceIdentity;
   status: ConnectionStatus;
+  capabilities: DeviceCapabilities;
   faders: FaderState[];
   lastSeenEpochMs: number;
+  sessionGeneration?: number | null;
 }
 
 export interface AppSettingsSummary {
@@ -70,4 +103,5 @@ export interface AppSnapshot {
   settings: AppSettingsSummary;
   service: ServiceStatus;
   devices: DeviceState[];
+  selectedDeviceId?: string | null;
 }

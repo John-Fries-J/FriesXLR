@@ -5,7 +5,11 @@ mod windows_tusb;
 
 #[cfg(not(windows))]
 mod windows_tusb {
-    use super::{DeviceError, DeviceProvider, DiscoverySnapshot, DriverInfo};
+    use super::{
+        DeviceError, DeviceProvider, DeviceSession, DiscoverySnapshot, DriverInfo,
+        SessionGeneration,
+    };
+    use goxlr_model::DeviceIdentity;
 
     #[derive(Debug, Default)]
     pub struct WindowsDeviceProvider;
@@ -21,6 +25,16 @@ mod windows_tusb {
             Ok(DiscoverySnapshot::default())
         }
 
+        fn open_session(
+            &self,
+            _identity: &DeviceIdentity,
+            _generation: SessionGeneration,
+        ) -> Result<Box<dyn DeviceSession>, DeviceError> {
+            Err(DeviceError::DriverUnavailable(
+                "Windows TUSBAUDIO sessions are not available on this platform".to_string(),
+            ))
+        }
+
         fn driver_info(&self) -> DriverInfo {
             DriverInfo {
                 interface: Some("unsupported-on-this-platform".to_string()),
@@ -32,11 +46,16 @@ mod windows_tusb {
     }
 }
 
-use goxlr_model::{DeviceIdentity, FaderState, VersionNumber};
+use goxlr_model::{
+    ChannelName, DeviceCapabilities, DeviceIdentity, FaderMuteState, FaderName, FaderState,
+    FaderVolume, VersionNumber,
+};
 use std::sync::Arc;
 
 pub use mock::MockDeviceProvider;
 pub use windows_tusb::WindowsDeviceProvider;
+
+pub type SessionGeneration = u64;
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DriverInfo {
@@ -48,6 +67,7 @@ pub struct DriverInfo {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeviceReadOnlyState {
+    pub capabilities: DeviceCapabilities,
     pub faders: Vec<FaderState>,
 }
 
@@ -62,9 +82,111 @@ pub struct DiscoverySnapshot {
     pub devices: Vec<DeviceConnectionInfo>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeviceSessionState {
+    pub identity: DeviceIdentity,
+    pub capabilities: DeviceCapabilities,
+    pub faders: Vec<FaderState>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeviceEvent {
+    FaderVolumeChanged {
+        device_id: String,
+        generation: SessionGeneration,
+        fader: FaderName,
+        volume: FaderVolume,
+    },
+    FaderMuteStateChanged {
+        device_id: String,
+        generation: SessionGeneration,
+        fader: FaderName,
+        mute_state: Option<FaderMuteState>,
+        muted: Option<bool>,
+    },
+    FaderMuteButtonChanged {
+        device_id: String,
+        generation: SessionGeneration,
+        fader: FaderName,
+        pressed: bool,
+    },
+    FaderAssignmentChanged {
+        device_id: String,
+        generation: SessionGeneration,
+        fader: FaderName,
+        channel: Option<ChannelName>,
+    },
+    Disconnected {
+        device_id: String,
+        generation: SessionGeneration,
+    },
+}
+
+impl DeviceEvent {
+    pub fn device_id(&self) -> &str {
+        match self {
+            DeviceEvent::FaderVolumeChanged { device_id, .. }
+            | DeviceEvent::FaderMuteStateChanged { device_id, .. }
+            | DeviceEvent::FaderMuteButtonChanged { device_id, .. }
+            | DeviceEvent::FaderAssignmentChanged { device_id, .. }
+            | DeviceEvent::Disconnected { device_id, .. } => device_id,
+        }
+    }
+
+    pub fn generation(&self) -> SessionGeneration {
+        match self {
+            DeviceEvent::FaderVolumeChanged { generation, .. }
+            | DeviceEvent::FaderMuteStateChanged { generation, .. }
+            | DeviceEvent::FaderMuteButtonChanged { generation, .. }
+            | DeviceEvent::FaderAssignmentChanged { generation, .. }
+            | DeviceEvent::Disconnected { generation, .. } => *generation,
+        }
+    }
+}
+
 pub trait DeviceProvider: Send + Sync {
     fn discover(&self) -> Result<DiscoverySnapshot, DeviceError>;
+
+    fn open_session(
+        &self,
+        identity: &DeviceIdentity,
+        generation: SessionGeneration,
+    ) -> Result<Box<dyn DeviceSession>, DeviceError>;
+
     fn driver_info(&self) -> DriverInfo;
+}
+
+pub trait DeviceSession: Send {
+    fn generation(&self) -> SessionGeneration;
+    fn current_state(&self) -> Result<DeviceSessionState, DeviceError>;
+    fn poll_event(&mut self) -> Result<Option<DeviceEvent>, DeviceError>;
+    fn close(&mut self);
+
+    fn set_fader_volume(
+        &mut self,
+        _fader: FaderName,
+        _volume: FaderVolume,
+    ) -> Result<(), DeviceError> {
+        Err(DeviceError::UnsupportedOperation(
+            "fader volume writes are not enabled for this device".to_string(),
+        ))
+    }
+
+    fn set_fader_mute(&mut self, _fader: FaderName, _muted: bool) -> Result<(), DeviceError> {
+        Err(DeviceError::UnsupportedOperation(
+            "fader mute writes are not enabled for this device".to_string(),
+        ))
+    }
+
+    fn set_fader_assignment(
+        &mut self,
+        _fader: FaderName,
+        _channel: ChannelName,
+    ) -> Result<(), DeviceError> {
+        Err(DeviceError::UnsupportedOperation(
+            "fader assignment writes are not enabled for this device".to_string(),
+        ))
+    }
 }
 
 pub struct CompositeDeviceProvider {
@@ -87,14 +209,48 @@ impl CompositeDeviceProvider {
 
 impl DeviceProvider for CompositeDeviceProvider {
     fn discover(&self) -> Result<DiscoverySnapshot, DeviceError> {
-        let mut snapshot = self.hardware.discover()?;
+        let mut snapshot = match self.hardware.discover() {
+            Ok(snapshot) => snapshot,
+            Err(DeviceError::DriverUnavailable(error)) => {
+                tracing::debug!(%error, "GoXLR hardware driver unavailable during discovery");
+                DiscoverySnapshot::default()
+            }
+            Err(error) => return Err(error),
+        };
         snapshot.devices.extend(self.mock.discover()?.devices);
         Ok(snapshot)
+    }
+
+    fn open_session(
+        &self,
+        identity: &DeviceIdentity,
+        generation: SessionGeneration,
+    ) -> Result<Box<dyn DeviceSession>, DeviceError> {
+        if identity.is_mock {
+            return self.mock.open_session(identity, generation);
+        }
+
+        self.hardware.open_session(identity, generation)
     }
 
     fn driver_info(&self) -> DriverInfo {
         self.hardware.driver_info()
     }
+}
+
+pub fn unavailable_faders() -> Vec<FaderState> {
+    FaderName::ALL
+        .into_iter()
+        .map(|name| FaderState {
+            name,
+            assigned_channel: None,
+            volume: None,
+            mute_state: None,
+            mute_function: None,
+            muted: None,
+            mute_button_pressed: None,
+        })
+        .collect()
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -104,4 +260,39 @@ pub enum DeviceError {
 
     #[error("device discovery failed: {0}")]
     Discovery(String),
+
+    #[error("device is unavailable: {0}")]
+    DeviceUnavailable(String),
+
+    #[error("device disconnected")]
+    DeviceDisconnected,
+
+    #[error("device session is closed")]
+    SessionClosed,
+
+    #[error("protocol error: {0}")]
+    Protocol(String),
+
+    #[error("request timed out: {0}")]
+    Timeout(String),
+
+    #[error("unsupported operation: {0}")]
+    UnsupportedOperation(String),
+
+    #[error("malformed response: {0}")]
+    MalformedResponse(String),
+
+    #[error("stale session")]
+    StaleSession,
+}
+
+impl From<goxlr_protocol::ProtocolError> for DeviceError {
+    fn from(value: goxlr_protocol::ProtocolError) -> Self {
+        match value {
+            goxlr_protocol::ProtocolError::MalformedResponse { reason } => {
+                DeviceError::MalformedResponse(reason)
+            }
+            other => DeviceError::Protocol(other.to_string()),
+        }
+    }
 }

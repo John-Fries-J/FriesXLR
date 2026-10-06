@@ -47,7 +47,7 @@ pub enum ConnectionStatus {
     Disconnected,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum FaderName {
     A,
     B,
@@ -55,7 +55,20 @@ pub enum FaderName {
     D,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+impl FaderName {
+    pub const ALL: [Self; 4] = [Self::A, Self::B, Self::C, Self::D];
+
+    pub fn index(self) -> usize {
+        match self {
+            FaderName::A => 0,
+            FaderName::B => 1,
+            FaderName::C => 2,
+            FaderName::D => 3,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ChannelName {
     Mic,
@@ -70,6 +83,21 @@ pub enum ChannelName {
     MicMonitor,
     LineOut,
     Unknown,
+}
+
+impl ChannelName {
+    pub const ASSIGNABLE: [Self; 10] = [
+        Self::Mic,
+        Self::LineIn,
+        Self::Console,
+        Self::System,
+        Self::Game,
+        Self::Chat,
+        Self::Sample,
+        Self::Music,
+        Self::Headphones,
+        Self::LineOut,
+    ];
 }
 
 impl Display for ChannelName {
@@ -88,6 +116,133 @@ impl Display for ChannelName {
             ChannelName::LineOut => f.write_str("Line Out"),
             ChannelName::Unknown => f.write_str("Unknown"),
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum MuteFunction {
+    All,
+    ToStream,
+    ToVoiceChat,
+    ToPhones,
+    ToLineOut,
+    ToStream2,
+    ToStreams,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum FaderMuteState {
+    Unmuted,
+    MutedToX,
+    MutedToAll,
+    Unknown,
+}
+
+impl FaderMuteState {
+    pub fn is_muted(self) -> Option<bool> {
+        match self {
+            FaderMuteState::Unmuted => Some(false),
+            FaderMuteState::MutedToX | FaderMuteState::MutedToAll => Some(true),
+            FaderMuteState::Unknown => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FaderVolume {
+    pub raw: u8,
+    pub percent: u8,
+}
+
+impl FaderVolume {
+    pub fn from_raw(raw: u8) -> Self {
+        Self {
+            raw,
+            percent: raw_to_percent(raw),
+        }
+    }
+
+    pub fn from_percent(percent: u8) -> Result<Self, ModelError> {
+        Ok(Self {
+            raw: percent_to_raw(percent)?,
+            percent,
+        })
+    }
+}
+
+pub fn raw_to_percent(raw: u8) -> u8 {
+    (((raw as u16) * 100 + 127) / 255) as u8
+}
+
+pub fn percent_to_raw(percent: u8) -> Result<u8, ModelError> {
+    if percent > 100 {
+        return Err(ModelError::InvalidVolumePercent(percent));
+    }
+
+    Ok((((percent as u16) * 255 + 50) / 100) as u8)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceCapabilities {
+    pub readable_fader_assignments: bool,
+    pub readable_fader_volumes: bool,
+    pub readable_fader_mute_state: bool,
+    pub readable_fader_button_state: bool,
+    pub writable_fader_volumes: bool,
+    pub writable_fader_mute_state: bool,
+    pub writable_fader_assignments: bool,
+    pub supported_assignment_channels: Vec<ChannelName>,
+}
+
+impl DeviceCapabilities {
+    pub fn unavailable() -> Self {
+        Self {
+            readable_fader_assignments: false,
+            readable_fader_volumes: false,
+            readable_fader_mute_state: false,
+            readable_fader_button_state: false,
+            writable_fader_volumes: false,
+            writable_fader_mute_state: false,
+            writable_fader_assignments: false,
+            supported_assignment_channels: Vec::new(),
+        }
+    }
+
+    pub fn mock() -> Self {
+        Self {
+            readable_fader_assignments: true,
+            readable_fader_volumes: true,
+            readable_fader_mute_state: true,
+            readable_fader_button_state: true,
+            writable_fader_volumes: true,
+            writable_fader_mute_state: true,
+            writable_fader_assignments: true,
+            supported_assignment_channels: ChannelName::ASSIGNABLE.to_vec(),
+        }
+    }
+
+    pub fn physical_read_only() -> Self {
+        Self {
+            readable_fader_assignments: false,
+            readable_fader_volumes: true,
+            readable_fader_mute_state: false,
+            readable_fader_button_state: true,
+            writable_fader_volumes: false,
+            writable_fader_mute_state: false,
+            writable_fader_assignments: false,
+            supported_assignment_channels: ChannelName::ASSIGNABLE.to_vec(),
+        }
+    }
+}
+
+impl Default for DeviceCapabilities {
+    fn default() -> Self {
+        Self::unavailable()
     }
 }
 
@@ -112,8 +267,11 @@ pub struct DeviceIdentity {
 pub struct FaderState {
     pub name: FaderName,
     pub assigned_channel: Option<ChannelName>,
-    pub volume: Option<u8>,
+    pub volume: Option<FaderVolume>,
+    pub mute_state: Option<FaderMuteState>,
+    pub mute_function: Option<MuteFunction>,
     pub muted: Option<bool>,
+    pub mute_button_pressed: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -121,8 +279,10 @@ pub struct FaderState {
 pub struct DeviceState {
     pub identity: DeviceIdentity,
     pub status: ConnectionStatus,
+    pub capabilities: DeviceCapabilities,
     pub faders: Vec<FaderState>,
     pub last_seen_epoch_ms: u64,
+    pub session_generation: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -172,6 +332,7 @@ pub struct AppSnapshot {
     pub settings: AppSettingsSummary,
     pub service: ServiceStatus,
     pub devices: Vec<DeviceState>,
+    pub selected_device_id: Option<String>,
 }
 
 impl AppSnapshot {
@@ -183,6 +344,7 @@ impl AppSnapshot {
                 last_error: None,
             },
             devices: Vec::new(),
+            selected_device_id: None,
         }
     }
 }
@@ -191,6 +353,9 @@ impl AppSnapshot {
 pub enum ModelError {
     #[error("invalid fader volume {0}; expected 0..=255")]
     InvalidFaderVolume(u16),
+
+    #[error("invalid fader volume percentage {0}; expected 0..=100")]
+    InvalidVolumePercent(u8),
 }
 
 pub fn validate_volume(volume: u16) -> Result<u8, ModelError> {
@@ -217,5 +382,20 @@ mod tests {
     fn rejects_volume_outside_device_range() {
         assert!(validate_volume(256).is_err());
         assert_eq!(validate_volume(255).unwrap(), 255);
+    }
+
+    #[test]
+    fn converts_raw_volume_to_percent() {
+        assert_eq!(FaderVolume::from_raw(0).percent, 0);
+        assert_eq!(FaderVolume::from_raw(128).percent, 50);
+        assert_eq!(FaderVolume::from_raw(255).percent, 100);
+    }
+
+    #[test]
+    fn converts_percent_volume_to_raw() {
+        assert_eq!(FaderVolume::from_percent(0).unwrap().raw, 0);
+        assert_eq!(FaderVolume::from_percent(50).unwrap().raw, 128);
+        assert_eq!(FaderVolume::from_percent(100).unwrap().raw, 255);
+        assert!(FaderVolume::from_percent(101).is_err());
     }
 }

@@ -1,19 +1,23 @@
 use goxlr_device::{
-    CompositeDeviceProvider, DeviceConnectionInfo, DeviceProvider, MockDeviceProvider,
+    CompositeDeviceProvider, DeviceConnectionInfo, DeviceError, DeviceEvent, DeviceProvider,
+    DeviceSession, DeviceSessionState, MockDeviceProvider, SessionGeneration,
 };
 use goxlr_model::{
-    AppSnapshot, ConnectionStatus, DeviceState, FaderName, FaderState, ServiceStatus,
+    AppSnapshot, ChannelName, ConnectionStatus, DeviceState, FaderName, FaderState, FaderVolume,
+    ServiceStatus,
 };
 use goxlr_profile::{AppConfig, ConfigError, ConfigStore};
+use std::collections::{HashMap, HashSet};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
 };
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tokio::sync::{broadcast, Notify, RwLock};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use tokio::sync::{broadcast, Mutex, Notify, RwLock};
 use tracing::{debug, info, warn};
 
 const DISCOVERY_INTERVAL: Duration = Duration::from_secs(1);
+const SESSION_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 #[derive(Debug, Clone)]
 pub enum ServiceEvent {
@@ -23,10 +27,23 @@ pub enum ServiceEvent {
 pub struct AppService {
     config_store: ConfigStore,
     provider: CompositeDeviceProvider,
+    runtime: Mutex<ServiceRuntime>,
     snapshot: RwLock<AppSnapshot>,
     events: broadcast::Sender<ServiceEvent>,
     shutdown_requested: AtomicBool,
     shutdown: Notify,
+}
+
+#[derive(Default)]
+struct ServiceRuntime {
+    sessions: HashMap<String, ActiveSession>,
+    selected_device_id: Option<String>,
+    next_generation: SessionGeneration,
+}
+
+struct ActiveSession {
+    session: Box<dyn DeviceSession>,
+    state: DeviceSessionState,
 }
 
 impl AppService {
@@ -40,6 +57,7 @@ impl AppService {
         Ok(Arc::new(Self {
             config_store,
             provider,
+            runtime: Mutex::new(ServiceRuntime::default()),
             snapshot: RwLock::new(snapshot),
             events,
             shutdown_requested: AtomicBool::new(false),
@@ -92,6 +110,76 @@ impl AppService {
         Ok(self.snapshot().await)
     }
 
+    pub async fn set_selected_device(
+        &self,
+        device_id: Option<String>,
+    ) -> Result<AppSnapshot, ServiceError> {
+        let config = self.config_store.load_or_default()?;
+        {
+            let mut runtime = self.runtime.lock().await;
+            if let Some(device_id) = &device_id {
+                if !runtime.sessions.contains_key(device_id) {
+                    return Err(ServiceError::Device(DeviceError::DeviceUnavailable(
+                        device_id.clone(),
+                    )));
+                }
+            }
+            runtime.selected_device_id = device_id;
+        }
+
+        self.publish_snapshot(&config).await;
+        Ok(self.snapshot().await)
+    }
+
+    pub async fn set_fader_volume(
+        &self,
+        device_id: String,
+        session_generation: SessionGeneration,
+        fader: FaderName,
+        percent: u8,
+    ) -> Result<AppSnapshot, ServiceError> {
+        let volume = FaderVolume::from_percent(percent)?;
+        self.with_session_mut(&device_id, session_generation, |session| {
+            session.set_fader_volume(fader, volume)
+        })
+        .await?;
+        self.refresh_session_state(&device_id).await?;
+
+        Ok(self.snapshot().await)
+    }
+
+    pub async fn set_fader_mute(
+        &self,
+        device_id: String,
+        session_generation: SessionGeneration,
+        fader: FaderName,
+        muted: bool,
+    ) -> Result<AppSnapshot, ServiceError> {
+        self.with_session_mut(&device_id, session_generation, |session| {
+            session.set_fader_mute(fader, muted)
+        })
+        .await?;
+        self.refresh_session_state(&device_id).await?;
+
+        Ok(self.snapshot().await)
+    }
+
+    pub async fn set_fader_assignment(
+        &self,
+        device_id: String,
+        session_generation: SessionGeneration,
+        fader: FaderName,
+        channel: ChannelName,
+    ) -> Result<AppSnapshot, ServiceError> {
+        self.with_session_mut(&device_id, session_generation, |session| {
+            session.set_fader_assignment(fader, channel)
+        })
+        .await?;
+        self.refresh_session_state(&device_id).await?;
+
+        Ok(self.snapshot().await)
+    }
+
     pub fn request_shutdown(&self) {
         self.shutdown_requested.store(true, Ordering::SeqCst);
         self.shutdown.notify_waiters();
@@ -100,6 +188,14 @@ impl AppService {
     pub async fn shutdown(&self) {
         self.request_shutdown();
 
+        {
+            let mut runtime = self.runtime.lock().await;
+            for active in runtime.sessions.values_mut() {
+                active.session.close();
+            }
+            runtime.sessions.clear();
+        }
+
         let mut snapshot = self.snapshot.read().await.clone();
         snapshot.service.running = false;
         self.replace_snapshot(snapshot).await;
@@ -107,10 +203,18 @@ impl AppService {
 
     pub async fn run(self: Arc<Self>) {
         info!("starting FriesXLR service loop");
+        let mut next_discovery = Instant::now();
 
         while !self.shutdown_requested.load(Ordering::SeqCst) {
-            if let Err(error) = self.refresh_once().await {
-                warn!(%error, "device refresh failed");
+            let result = if Instant::now() >= next_discovery {
+                next_discovery = Instant::now() + DISCOVERY_INTERVAL;
+                self.refresh_once().await
+            } else {
+                self.poll_sessions_once().await
+            };
+
+            if let Err(error) = result {
+                warn!(%error, "service update failed");
                 self.set_service_error(error.to_string()).await;
             }
 
@@ -119,7 +223,7 @@ impl AppService {
             }
 
             tokio::select! {
-                _ = tokio::time::sleep(DISCOVERY_INTERVAL) => {}
+                _ = tokio::time::sleep(SESSION_POLL_INTERVAL) => {}
                 _ = self.shutdown.notified() => {}
             }
         }
@@ -132,19 +236,172 @@ impl AppService {
         self.provider.set_mock_enabled(config.mock_device_enabled);
 
         let discovery = self.provider.discover()?;
-        let devices = discovery
-            .devices
-            .into_iter()
-            .map(device_state_from_connection)
+        self.reconcile_discovery(discovery.devices).await;
+        self.poll_sessions_locked().await?;
+        self.publish_snapshot(&config).await;
+        Ok(())
+    }
+
+    async fn poll_sessions_once(&self) -> Result<(), ServiceError> {
+        let config = self.config_store.load_or_default()?;
+        self.poll_sessions_locked().await?;
+        self.publish_snapshot(&config).await;
+        Ok(())
+    }
+
+    async fn reconcile_discovery(&self, devices: Vec<DeviceConnectionInfo>) {
+        let discovered_ids = devices
+            .iter()
+            .map(|device| device.identity.id.clone())
+            .collect::<HashSet<_>>();
+
+        let mut runtime = self.runtime.lock().await;
+        let stale_ids = runtime
+            .sessions
+            .keys()
+            .filter(|device_id| !discovered_ids.contains(*device_id))
+            .cloned()
             .collect::<Vec<_>>();
 
-        let mut next = AppSnapshot {
-            settings: settings_summary(&self.config_store, &config),
-            service: ServiceStatus {
-                running: !self.shutdown_requested.load(Ordering::SeqCst),
-                last_error: None,
-            },
-            devices,
+        for device_id in stale_ids {
+            if let Some(mut active) = runtime.sessions.remove(&device_id) {
+                active.session.close();
+                info!(%device_id, "device disconnected");
+            }
+        }
+
+        for connection in devices {
+            if runtime.sessions.contains_key(&connection.identity.id) {
+                continue;
+            }
+
+            runtime.next_generation = runtime.next_generation.saturating_add(1);
+            let generation = runtime.next_generation;
+            let device_id = connection.identity.id.clone();
+            match self.provider.open_session(&connection.identity, generation) {
+                Ok(session) => match session.current_state() {
+                    Ok(state) => {
+                        info!(
+                            %device_id,
+                            session_generation = generation,
+                            "created device session"
+                        );
+                        runtime
+                            .sessions
+                            .insert(device_id.clone(), ActiveSession { session, state });
+                    }
+                    Err(error) => {
+                        warn!(%device_id, %error, "opened session but could not read state");
+                    }
+                },
+                Err(error) => {
+                    warn!(%device_id, %error, "failed to open device session");
+                }
+            }
+        }
+
+        ensure_selected_device(&mut runtime);
+    }
+
+    async fn poll_sessions_locked(&self) -> Result<(), ServiceError> {
+        let mut runtime = self.runtime.lock().await;
+        let device_ids = runtime.sessions.keys().cloned().collect::<Vec<_>>();
+        let mut disconnected = Vec::new();
+
+        for device_id in device_ids {
+            let Some(active) = runtime.sessions.get_mut(&device_id) else {
+                continue;
+            };
+
+            loop {
+                let event = active.session.poll_event()?;
+                let Some(event) = event else {
+                    break;
+                };
+
+                if event.generation() != active.session.generation() {
+                    warn!(
+                        device_id = event.device_id(),
+                        event_generation = event.generation(),
+                        session_generation = active.session.generation(),
+                        "ignored stale device event"
+                    );
+                    continue;
+                }
+
+                if matches!(event, DeviceEvent::Disconnected { .. }) {
+                    disconnected.push(device_id.clone());
+                    break;
+                }
+
+                apply_event_to_state(&mut active.state, event);
+            }
+        }
+
+        for device_id in disconnected {
+            if let Some(mut active) = runtime.sessions.remove(&device_id) {
+                active.session.close();
+                info!(%device_id, "device session removed after disconnect");
+            }
+        }
+
+        ensure_selected_device(&mut runtime);
+        Ok(())
+    }
+
+    async fn refresh_session_state(&self, device_id: &str) -> Result<(), ServiceError> {
+        let config = self.config_store.load_or_default()?;
+        {
+            let mut runtime = self.runtime.lock().await;
+            let active = runtime
+                .sessions
+                .get_mut(device_id)
+                .ok_or_else(|| DeviceError::DeviceUnavailable(device_id.to_string()))?;
+            active.state = active.session.current_state()?;
+        }
+        self.publish_snapshot(&config).await;
+        Ok(())
+    }
+
+    async fn with_session_mut<F>(
+        &self,
+        device_id: &str,
+        session_generation: SessionGeneration,
+        operation: F,
+    ) -> Result<(), ServiceError>
+    where
+        F: FnOnce(&mut dyn DeviceSession) -> Result<(), DeviceError>,
+    {
+        let mut runtime = self.runtime.lock().await;
+        let active = runtime
+            .sessions
+            .get_mut(device_id)
+            .ok_or_else(|| DeviceError::DeviceUnavailable(device_id.to_string()))?;
+
+        if active.session.generation() != session_generation {
+            return Err(ServiceError::Device(DeviceError::StaleSession));
+        }
+
+        operation(active.session.as_mut())?;
+        Ok(())
+    }
+
+    async fn publish_snapshot(&self, config: &AppConfig) {
+        let mut next = {
+            let runtime = self.runtime.lock().await;
+            AppSnapshot {
+                settings: settings_summary(&self.config_store, config),
+                service: ServiceStatus {
+                    running: !self.shutdown_requested.load(Ordering::SeqCst),
+                    last_error: None,
+                },
+                devices: runtime
+                    .sessions
+                    .values()
+                    .map(device_state_from_session)
+                    .collect(),
+                selected_device_id: runtime.selected_device_id.clone(),
+            }
         };
 
         let driver = self.provider.driver_info();
@@ -153,7 +410,6 @@ impl AppService {
         }
 
         self.replace_snapshot(next).await;
-        Ok(())
     }
 
     async fn set_service_error(&self, error: String) {
@@ -183,30 +439,63 @@ fn settings_summary(
     config.summary(Some(config_store.path().display().to_string()))
 }
 
-fn device_state_from_connection(connection: DeviceConnectionInfo) -> DeviceState {
-    let faders = connection
-        .read_only_state
-        .map(|state| state.faders)
-        .unwrap_or_else(empty_faders);
+fn ensure_selected_device(runtime: &mut ServiceRuntime) {
+    let selected_valid = runtime
+        .selected_device_id
+        .as_ref()
+        .map(|device_id| runtime.sessions.contains_key(device_id))
+        .unwrap_or(false);
 
-    DeviceState {
-        identity: connection.identity,
-        status: ConnectionStatus::Connected,
-        faders,
-        last_seen_epoch_ms: epoch_ms(),
+    if !selected_valid {
+        runtime.selected_device_id = runtime.sessions.keys().next().cloned();
     }
 }
 
-fn empty_faders() -> Vec<FaderState> {
-    [FaderName::A, FaderName::B, FaderName::C, FaderName::D]
-        .into_iter()
-        .map(|name| FaderState {
-            name,
-            assigned_channel: None,
-            volume: None,
-            muted: None,
-        })
-        .collect()
+fn device_state_from_session(active: &ActiveSession) -> DeviceState {
+    DeviceState {
+        identity: active.state.identity.clone(),
+        status: ConnectionStatus::Connected,
+        capabilities: active.state.capabilities.clone(),
+        faders: active.state.faders.clone(),
+        last_seen_epoch_ms: epoch_ms(),
+        session_generation: Some(active.session.generation()),
+    }
+}
+
+fn apply_event_to_state(state: &mut DeviceSessionState, event: DeviceEvent) {
+    match event {
+        DeviceEvent::FaderVolumeChanged { fader, volume, .. } => {
+            if let Some(fader_state) = fader_mut(&mut state.faders, fader) {
+                fader_state.volume = Some(volume);
+            }
+        }
+        DeviceEvent::FaderMuteStateChanged {
+            fader,
+            mute_state,
+            muted,
+            ..
+        } => {
+            if let Some(fader_state) = fader_mut(&mut state.faders, fader) {
+                fader_state.mute_state = mute_state;
+                fader_state.muted = muted;
+            }
+        }
+        DeviceEvent::FaderMuteButtonChanged { fader, pressed, .. } => {
+            if let Some(fader_state) = fader_mut(&mut state.faders, fader) {
+                fader_state.mute_button_pressed = Some(pressed);
+            }
+        }
+        DeviceEvent::FaderAssignmentChanged { fader, channel, .. } => {
+            if let Some(fader_state) = fader_mut(&mut state.faders, fader) {
+                fader_state.assigned_channel = channel;
+            }
+        }
+        DeviceEvent::Disconnected { .. } => {}
+    }
+}
+
+fn fader_mut(faders: &mut [FaderState], fader: FaderName) -> Option<&mut FaderState> {
+    faders.iter_mut().find(|state| state.name == fader)
 }
 
 fn epoch_ms() -> u64 {
@@ -223,11 +512,18 @@ pub enum ServiceError {
 
     #[error(transparent)]
     Device(#[from] goxlr_device::DeviceError),
+
+    #[error(transparent)]
+    Model(#[from] goxlr_model::ModelError),
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use goxlr_model::{
+        DeviceCapabilities, DeviceIdentity, DeviceModel, FaderMuteState, VersionNumber,
+    };
+    use std::collections::VecDeque;
 
     #[tokio::test]
     async fn enabling_mock_device_updates_snapshot() {
@@ -244,14 +540,191 @@ mod tests {
             .count();
 
         assert_eq!(mock_devices, 1);
+        assert_eq!(
+            snapshot.selected_device_id.as_deref(),
+            Some("mock:goxlr-mini:dev")
+        );
     }
 
-    #[test]
-    fn creates_empty_fader_state_for_real_discovery_without_control_reads() {
-        let faders = empty_faders();
+    #[tokio::test]
+    async fn mock_state_initialises_from_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ConfigStore::new(dir.path().join("config.json"));
+        let service = AppService::new(store).await.unwrap();
+        let snapshot = service.set_mock_device_enabled(true).await.unwrap();
+        let device = snapshot
+            .devices
+            .iter()
+            .find(|device| device.identity.is_mock)
+            .expect("mock device should be available");
 
-        assert_eq!(faders.len(), 4);
-        assert!(faders.iter().all(|fader| fader.volume.is_none()));
+        assert_eq!(
+            device.identity.serial_number.as_deref(),
+            Some("MOCK-MINI-0001")
+        );
+        assert!(device.identity.firmware_version.is_some());
+        assert!(device.capabilities.readable_fader_assignments);
+        assert!(device.capabilities.writable_fader_volumes);
+        assert_eq!(device.faders.len(), 4);
+        assert_eq!(device.faders[0].assigned_channel, Some(ChannelName::Mic));
+        assert_eq!(device.faders[0].volume.unwrap().raw, 196);
+        assert_eq!(device.faders[0].mute_state, Some(FaderMuteState::Unmuted));
+        assert_eq!(
+            device.faders[0].mute_function,
+            Some(goxlr_model::MuteFunction::All)
+        );
+        assert_eq!(device.faders[0].mute_button_pressed, Some(false));
+    }
+
+    #[tokio::test]
+    async fn mock_volume_command_updates_authoritative_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ConfigStore::new(dir.path().join("config.json"));
+        let service = AppService::new(store).await.unwrap();
+        let snapshot = service.set_mock_device_enabled(true).await.unwrap();
+        let device = snapshot
+            .devices
+            .iter()
+            .find(|device| device.identity.is_mock)
+            .expect("mock device should be available");
+
+        let snapshot = service
+            .set_fader_volume(
+                device.identity.id.clone(),
+                device.session_generation.unwrap(),
+                FaderName::A,
+                25,
+            )
+            .await
+            .unwrap();
+
+        let mock_device = snapshot
+            .devices
+            .iter()
+            .find(|device| device.identity.is_mock)
+            .expect("mock device should be available");
+
+        assert_eq!(mock_device.faders[0].volume.unwrap().percent, 25);
+    }
+
+    #[tokio::test]
+    async fn stale_session_generation_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ConfigStore::new(dir.path().join("config.json"));
+        let service = AppService::new(store).await.unwrap();
+        let snapshot = service.set_mock_device_enabled(true).await.unwrap();
+        let device_id = snapshot.devices[0].identity.id.clone();
+
+        let error = service
+            .set_fader_volume(device_id, 999, FaderName::A, 25)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            ServiceError::Device(DeviceError::StaleSession)
+        ));
+    }
+
+    #[tokio::test]
+    async fn stale_session_events_are_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ConfigStore::new(dir.path().join("config.json"));
+        let service = AppService::new(store).await.unwrap();
+        let device_id = "test:queued".to_string();
+        let generation = 7;
+        let state = queued_state(device_id.clone(), FaderVolume::from_raw(10));
+        let events = VecDeque::from([
+            DeviceEvent::FaderVolumeChanged {
+                device_id: device_id.clone(),
+                generation: generation - 1,
+                fader: FaderName::A,
+                volume: FaderVolume::from_raw(20),
+            },
+            DeviceEvent::FaderVolumeChanged {
+                device_id: device_id.clone(),
+                generation,
+                fader: FaderName::A,
+                volume: FaderVolume::from_raw(30),
+            },
+        ]);
+
+        {
+            let mut runtime = service.runtime.lock().await;
+            runtime.sessions.insert(
+                device_id.clone(),
+                ActiveSession {
+                    session: Box::new(QueuedEventSession {
+                        generation,
+                        state: state.clone(),
+                        events,
+                        closed: false,
+                    }),
+                    state,
+                },
+            );
+            runtime.selected_device_id = Some(device_id.clone());
+        }
+
+        service.poll_sessions_once().await.unwrap();
+        let snapshot = service.snapshot().await;
+        let device = snapshot
+            .devices
+            .iter()
+            .find(|device| device.identity.id == device_id)
+            .unwrap();
+
+        assert_eq!(device.faders[0].volume.unwrap().raw, 30);
+    }
+
+    #[tokio::test]
+    async fn mock_disconnect_and_reconnect_restores_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ConfigStore::new(dir.path().join("config.json"));
+        let service = AppService::new(store).await.unwrap();
+        let snapshot = service.set_mock_device_enabled(true).await.unwrap();
+        let first_generation = snapshot
+            .devices
+            .iter()
+            .find(|device| device.identity.is_mock)
+            .unwrap()
+            .session_generation
+            .unwrap();
+
+        let snapshot = service.set_mock_device_enabled(false).await.unwrap();
+        assert!(snapshot
+            .devices
+            .iter()
+            .all(|device| !device.identity.is_mock));
+
+        let snapshot = service.set_mock_device_enabled(true).await.unwrap();
+        let mock = snapshot
+            .devices
+            .iter()
+            .find(|device| device.identity.is_mock)
+            .unwrap();
+
+        assert!(mock.session_generation.unwrap() > first_generation);
+        assert_eq!(mock.faders[0].assigned_channel, Some(ChannelName::Mic));
+        assert!(mock.faders[0].volume.is_some());
+    }
+
+    #[tokio::test]
+    async fn selected_device_can_be_changed() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ConfigStore::new(dir.path().join("config.json"));
+        let service = AppService::new(store).await.unwrap();
+        service.set_mock_device_enabled(true).await.unwrap();
+
+        let snapshot = service
+            .set_selected_device(Some("mock:goxlr-mini:dev".to_string()))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            snapshot.selected_device_id.as_deref(),
+            Some("mock:goxlr-mini:dev")
+        );
     }
 
     #[tokio::test]
@@ -271,5 +744,70 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
+    }
+
+    struct QueuedEventSession {
+        generation: SessionGeneration,
+        state: DeviceSessionState,
+        events: VecDeque<DeviceEvent>,
+        closed: bool,
+    }
+
+    impl DeviceSession for QueuedEventSession {
+        fn generation(&self) -> SessionGeneration {
+            self.generation
+        }
+
+        fn current_state(&self) -> Result<DeviceSessionState, DeviceError> {
+            if self.closed {
+                return Err(DeviceError::SessionClosed);
+            }
+
+            Ok(self.state.clone())
+        }
+
+        fn poll_event(&mut self) -> Result<Option<DeviceEvent>, DeviceError> {
+            Ok(self.events.pop_front())
+        }
+
+        fn close(&mut self) {
+            self.closed = true;
+        }
+    }
+
+    fn queued_state(device_id: String, volume: FaderVolume) -> DeviceSessionState {
+        DeviceSessionState {
+            identity: DeviceIdentity {
+                id: device_id,
+                model: DeviceModel::GoXlrMini,
+                vendor_id: None,
+                product_id: None,
+                manufacturer_name: Some("Test".to_string()),
+                product_name: Some("Queued Session".to_string()),
+                serial_number: Some("TEST-1".to_string()),
+                firmware_version: Some(VersionNumber {
+                    major: 1,
+                    minor: 0,
+                    patch: None,
+                    build: None,
+                }),
+                driver_interface: Some("test".to_string()),
+                driver_version: None,
+                is_mock: true,
+            },
+            capabilities: DeviceCapabilities::mock(),
+            faders: FaderName::ALL
+                .into_iter()
+                .map(|name| FaderState {
+                    name,
+                    assigned_channel: Some(ChannelName::Mic),
+                    volume: Some(volume),
+                    mute_state: Some(FaderMuteState::Unmuted),
+                    mute_function: Some(goxlr_model::MuteFunction::All),
+                    muted: Some(false),
+                    mute_button_pressed: Some(false),
+                })
+                .collect(),
+        }
     }
 }
