@@ -3,7 +3,8 @@ use goxlr_device::{
     DeviceSession, DeviceSessionState, MockDeviceProvider, SessionGeneration,
 };
 use goxlr_model::{
-    AppSnapshot, ChannelName, ConnectionStatus, DeviceState, FaderName, FaderState, FaderVolume,
+    AppSnapshot, ChannelName, CompressorState, ConnectionStatus, DeEsserState, DeviceState,
+    EqBandId, FaderName, FaderState, FaderVolume, MicrophoneType, NoiseGateState, RoutingRoute,
     ServiceStatus,
 };
 use goxlr_profile::{AppConfig, ConfigError, ConfigStore};
@@ -173,6 +174,116 @@ impl AppService {
     ) -> Result<AppSnapshot, ServiceError> {
         self.with_session_mut(&device_id, session_generation, |session| {
             session.set_fader_assignment(fader, channel)
+        })
+        .await?;
+        self.refresh_session_state(&device_id).await?;
+
+        Ok(self.snapshot().await)
+    }
+
+    pub async fn set_routing_route(
+        &self,
+        device_id: String,
+        session_generation: SessionGeneration,
+        route: RoutingRoute,
+        enabled: bool,
+    ) -> Result<AppSnapshot, ServiceError> {
+        self.with_session_mut(&device_id, session_generation, |session| {
+            session.set_routing_route(route, enabled)
+        })
+        .await?;
+        self.refresh_session_state(&device_id).await?;
+
+        Ok(self.snapshot().await)
+    }
+
+    pub async fn set_microphone_type(
+        &self,
+        device_id: String,
+        session_generation: SessionGeneration,
+        microphone_type: MicrophoneType,
+        confirm_phantom_power: bool,
+    ) -> Result<AppSnapshot, ServiceError> {
+        self.with_session_mut(&device_id, session_generation, |session| {
+            session.set_microphone_type(microphone_type, confirm_phantom_power)
+        })
+        .await?;
+        self.refresh_session_state(&device_id).await?;
+
+        Ok(self.snapshot().await)
+    }
+
+    pub async fn set_microphone_gain(
+        &self,
+        device_id: String,
+        session_generation: SessionGeneration,
+        microphone_type: MicrophoneType,
+        gain_db: u16,
+    ) -> Result<AppSnapshot, ServiceError> {
+        self.with_session_mut(&device_id, session_generation, |session| {
+            session.set_microphone_gain(microphone_type, gain_db)
+        })
+        .await?;
+        self.refresh_session_state(&device_id).await?;
+
+        Ok(self.snapshot().await)
+    }
+
+    pub async fn set_equalizer_band(
+        &self,
+        device_id: String,
+        session_generation: SessionGeneration,
+        band_id: EqBandId,
+        frequency_tenths_hz: u32,
+        gain_db: i8,
+    ) -> Result<AppSnapshot, ServiceError> {
+        self.with_session_mut(&device_id, session_generation, |session| {
+            session.set_equalizer_band(band_id, frequency_tenths_hz, gain_db)
+        })
+        .await?;
+        self.refresh_session_state(&device_id).await?;
+
+        Ok(self.snapshot().await)
+    }
+
+    pub async fn set_noise_gate(
+        &self,
+        device_id: String,
+        session_generation: SessionGeneration,
+        gate: NoiseGateState,
+    ) -> Result<AppSnapshot, ServiceError> {
+        self.with_session_mut(&device_id, session_generation, |session| {
+            session.set_noise_gate(gate)
+        })
+        .await?;
+        self.refresh_session_state(&device_id).await?;
+
+        Ok(self.snapshot().await)
+    }
+
+    pub async fn set_compressor(
+        &self,
+        device_id: String,
+        session_generation: SessionGeneration,
+        compressor: CompressorState,
+    ) -> Result<AppSnapshot, ServiceError> {
+        self.with_session_mut(&device_id, session_generation, |session| {
+            session.set_compressor(compressor)
+        })
+        .await?;
+        self.refresh_session_state(&device_id).await?;
+
+        Ok(self.snapshot().await)
+    }
+
+    pub async fn set_de_esser(
+        &self,
+        device_id: String,
+        session_generation: SessionGeneration,
+        de_esser: DeEsserState,
+    ) -> Result<AppSnapshot, ServiceError> {
+        self.with_session_mut(&device_id, session_generation, |session| {
+            session.set_de_esser(de_esser)
         })
         .await?;
         self.refresh_session_state(&device_id).await?;
@@ -457,6 +568,8 @@ fn device_state_from_session(active: &ActiveSession) -> DeviceState {
         status: ConnectionStatus::Connected,
         capabilities: active.state.capabilities.clone(),
         faders: active.state.faders.clone(),
+        routing: active.state.routing.clone(),
+        microphone: active.state.microphone.clone(),
         last_seen_epoch_ms: epoch_ms(),
         session_generation: Some(active.session.generation()),
     }
@@ -490,6 +603,12 @@ fn apply_event_to_state(state: &mut DeviceSessionState, event: DeviceEvent) {
                 fader_state.assigned_channel = channel;
             }
         }
+        DeviceEvent::RoutingChanged { routing, .. } => {
+            state.routing = Some(routing);
+        }
+        DeviceEvent::MicrophoneChanged { microphone, .. } => {
+            state.microphone = Some(microphone);
+        }
         DeviceEvent::Disconnected { .. } => {}
     }
 }
@@ -521,7 +640,8 @@ pub enum ServiceError {
 mod tests {
     use super::*;
     use goxlr_model::{
-        DeviceCapabilities, DeviceIdentity, DeviceModel, FaderMuteState, VersionNumber,
+        DeviceCapabilities, DeviceIdentity, DeviceModel, FaderMuteState, MicrophoneType,
+        RoutingRoute, VersionNumber,
     };
     use std::collections::VecDeque;
 
@@ -605,6 +725,85 @@ mod tests {
             .expect("mock device should be available");
 
         assert_eq!(mock_device.faders[0].volume.unwrap().percent, 25);
+    }
+
+    #[tokio::test]
+    async fn mock_routing_command_updates_authoritative_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ConfigStore::new(dir.path().join("config.json"));
+        let service = AppService::new(store).await.unwrap();
+        let snapshot = service.set_mock_device_enabled(true).await.unwrap();
+        let device = snapshot
+            .devices
+            .iter()
+            .find(|device| device.identity.is_mock)
+            .expect("mock device should be available");
+        let route = RoutingRoute {
+            input: goxlr_model::RoutingInput::Music,
+            output: goxlr_model::RoutingOutput::BroadcastMix,
+        };
+
+        let snapshot = service
+            .set_routing_route(
+                device.identity.id.clone(),
+                device.session_generation.unwrap(),
+                route,
+                false,
+            )
+            .await
+            .unwrap();
+
+        let mock_device = snapshot
+            .devices
+            .iter()
+            .find(|device| device.identity.is_mock)
+            .expect("mock device should be available");
+
+        assert_eq!(
+            mock_device.routing.as_ref().unwrap().is_enabled(route),
+            Some(false)
+        );
+    }
+
+    #[tokio::test]
+    async fn mock_microphone_command_updates_authoritative_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ConfigStore::new(dir.path().join("config.json"));
+        let service = AppService::new(store).await.unwrap();
+        let snapshot = service.set_mock_device_enabled(true).await.unwrap();
+        let device = snapshot
+            .devices
+            .iter()
+            .find(|device| device.identity.is_mock)
+            .expect("mock device should be available");
+
+        let snapshot = service
+            .set_microphone_gain(
+                device.identity.id.clone(),
+                device.session_generation.unwrap(),
+                MicrophoneType::Dynamic,
+                44,
+            )
+            .await
+            .unwrap();
+
+        let mock_device = snapshot
+            .devices
+            .iter()
+            .find(|device| device.identity.is_mock)
+            .expect("mock device should be available");
+
+        let dynamic_gain = mock_device
+            .microphone
+            .as_ref()
+            .unwrap()
+            .setup
+            .gains
+            .iter()
+            .find(|gain| gain.microphone_type == MicrophoneType::Dynamic)
+            .unwrap();
+
+        assert_eq!(dynamic_gain.hardware_db, 44);
     }
 
     #[tokio::test]
@@ -808,6 +1007,8 @@ mod tests {
                     mute_button_pressed: Some(false),
                 })
                 .collect(),
+            routing: None,
+            microphone: None,
         }
     }
 }

@@ -1,4 +1,7 @@
-use goxlr_model::{AppSnapshot, ChannelName, FaderName};
+use goxlr_model::{
+    AppSnapshot, ChannelName, CompressorState, DeEsserState, EqBandId, FaderName, MicrophoneType,
+    NoiseGateState, RoutingRoute,
+};
 use goxlr_service::AppService;
 use serde::Serialize;
 use std::sync::{
@@ -137,6 +140,120 @@ pub async fn set_fader_assignment(
     state
         .service
         .set_fader_assignment(device_id, session_generation, fader, channel)
+        .await
+        .map_err(CommandError::from)
+}
+
+#[tauri::command]
+pub async fn set_routing_route(
+    device_id: String,
+    session_generation: u64,
+    route: RoutingRoute,
+    enabled: bool,
+    state: State<'_, DesktopState>,
+) -> Result<AppSnapshot, CommandError> {
+    state
+        .service
+        .set_routing_route(device_id, session_generation, route, enabled)
+        .await
+        .map_err(CommandError::from)
+}
+
+#[tauri::command]
+pub async fn set_microphone_type(
+    device_id: String,
+    session_generation: u64,
+    microphone_type: MicrophoneType,
+    confirm_phantom_power: bool,
+    state: State<'_, DesktopState>,
+) -> Result<AppSnapshot, CommandError> {
+    state
+        .service
+        .set_microphone_type(
+            device_id,
+            session_generation,
+            microphone_type,
+            confirm_phantom_power,
+        )
+        .await
+        .map_err(CommandError::from)
+}
+
+#[tauri::command]
+pub async fn set_microphone_gain(
+    device_id: String,
+    session_generation: u64,
+    microphone_type: MicrophoneType,
+    gain_db: u16,
+    state: State<'_, DesktopState>,
+) -> Result<AppSnapshot, CommandError> {
+    state
+        .service
+        .set_microphone_gain(device_id, session_generation, microphone_type, gain_db)
+        .await
+        .map_err(CommandError::from)
+}
+
+#[tauri::command]
+pub async fn set_equalizer_band(
+    device_id: String,
+    session_generation: u64,
+    band_id: EqBandId,
+    frequency_tenths_hz: u32,
+    gain_db: i8,
+    state: State<'_, DesktopState>,
+) -> Result<AppSnapshot, CommandError> {
+    state
+        .service
+        .set_equalizer_band(
+            device_id,
+            session_generation,
+            band_id,
+            frequency_tenths_hz,
+            gain_db,
+        )
+        .await
+        .map_err(CommandError::from)
+}
+
+#[tauri::command]
+pub async fn set_noise_gate(
+    device_id: String,
+    session_generation: u64,
+    gate: NoiseGateState,
+    state: State<'_, DesktopState>,
+) -> Result<AppSnapshot, CommandError> {
+    state
+        .service
+        .set_noise_gate(device_id, session_generation, gate)
+        .await
+        .map_err(CommandError::from)
+}
+
+#[tauri::command]
+pub async fn set_compressor(
+    device_id: String,
+    session_generation: u64,
+    compressor: CompressorState,
+    state: State<'_, DesktopState>,
+) -> Result<AppSnapshot, CommandError> {
+    state
+        .service
+        .set_compressor(device_id, session_generation, compressor)
+        .await
+        .map_err(CommandError::from)
+}
+
+#[tauri::command]
+pub async fn set_de_esser(
+    device_id: String,
+    session_generation: u64,
+    de_esser: DeEsserState,
+    state: State<'_, DesktopState>,
+) -> Result<AppSnapshot, CommandError> {
+    state
+        .service
+        .set_de_esser(device_id, session_generation, de_esser)
         .await
         .map_err(CommandError::from)
 }

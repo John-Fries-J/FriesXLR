@@ -3,9 +3,10 @@ mod logging;
 mod tray;
 
 use commands::{
-    get_snapshot, quit_application, set_fader_assignment, set_fader_mute, set_fader_volume,
-    set_launch_at_startup_enabled, set_mock_device_enabled, set_selected_device,
-    set_start_minimized, DesktopState,
+    get_snapshot, quit_application, set_compressor, set_de_esser, set_equalizer_band,
+    set_fader_assignment, set_fader_mute, set_fader_volume, set_launch_at_startup_enabled,
+    set_microphone_gain, set_microphone_type, set_mock_device_enabled, set_noise_gate,
+    set_routing_route, set_selected_device, set_start_minimized, DesktopState,
 };
 use goxlr_profile::{AppConfig, ConfigStore};
 use goxlr_service::{AppService, ServiceEvent};
@@ -78,6 +79,13 @@ pub fn run() {
             set_fader_volume,
             set_fader_mute,
             set_fader_assignment,
+            set_routing_route,
+            set_microphone_type,
+            set_microphone_gain,
+            set_equalizer_band,
+            set_noise_gate,
+            set_compressor,
+            set_de_esser,
             quit_application
         ])
         .run(tauri::generate_context!())

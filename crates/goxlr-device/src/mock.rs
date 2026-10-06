@@ -3,8 +3,12 @@ use crate::{
     DeviceSession, DeviceSessionState, DiscoverySnapshot, DriverInfo, SessionGeneration,
 };
 use goxlr_model::{
-    ChannelName, DeviceCapabilities, DeviceIdentity, DeviceModel, FaderMuteState, FaderName,
-    FaderState, FaderVolume, VersionNumber,
+    compressor_attack_option, compressor_ratio_option, compressor_release_option,
+    validate_compressor_makeup_gain_db, validate_compressor_threshold_db, validate_eq_frequency,
+    validate_eq_gain_db, validate_gate_threshold_db, validate_microphone_gain_db, validate_percent,
+    ChannelName, CompressorState, DeEsserState, DeviceCapabilities, DeviceIdentity, DeviceModel,
+    EqBandId, EqBandState, FaderMuteState, FaderName, FaderState, FaderVolume, MicrophoneState,
+    MicrophoneType, NoiseGateState, RoutingRoute, RoutingState, VersionNumber,
 };
 use parking_lot::Mutex;
 use std::collections::VecDeque;
@@ -80,6 +84,8 @@ impl DeviceProvider for MockDeviceProvider {
                 read_only_state: Some(DeviceReadOnlyState {
                     capabilities: DeviceCapabilities::mock(),
                     faders: state.faders.clone(),
+                    routing: Some(state.routing.clone()),
+                    microphone: Some(state.microphone.clone()),
                 }),
             }],
         })
@@ -139,6 +145,8 @@ impl DeviceSession for MockDeviceSession {
             identity: state.identity.clone(),
             capabilities: DeviceCapabilities::mock(),
             faders: state.faders.clone(),
+            routing: Some(state.routing.clone()),
+            microphone: Some(state.microphone.clone()),
         })
     }
 
@@ -193,6 +201,81 @@ impl DeviceSession for MockDeviceSession {
 
         self.state.lock().set_fader_assignment(fader, channel)
     }
+
+    fn set_routing_route(&mut self, route: RoutingRoute, enabled: bool) -> Result<(), DeviceError> {
+        if self.closed {
+            return Err(DeviceError::SessionClosed);
+        }
+
+        self.state.lock().set_routing_route(route, enabled)
+    }
+
+    fn set_microphone_type(
+        &mut self,
+        microphone_type: MicrophoneType,
+        confirm_phantom_power: bool,
+    ) -> Result<(), DeviceError> {
+        if self.closed {
+            return Err(DeviceError::SessionClosed);
+        }
+
+        self.state
+            .lock()
+            .set_microphone_type(microphone_type, confirm_phantom_power)
+    }
+
+    fn set_microphone_gain(
+        &mut self,
+        microphone_type: MicrophoneType,
+        gain_db: u16,
+    ) -> Result<(), DeviceError> {
+        if self.closed {
+            return Err(DeviceError::SessionClosed);
+        }
+
+        self.state
+            .lock()
+            .set_microphone_gain(microphone_type, gain_db)
+    }
+
+    fn set_equalizer_band(
+        &mut self,
+        band_id: EqBandId,
+        frequency_tenths_hz: u32,
+        gain_db: i8,
+    ) -> Result<(), DeviceError> {
+        if self.closed {
+            return Err(DeviceError::SessionClosed);
+        }
+
+        self.state
+            .lock()
+            .set_equalizer_band(band_id, frequency_tenths_hz, gain_db)
+    }
+
+    fn set_noise_gate(&mut self, gate: NoiseGateState) -> Result<(), DeviceError> {
+        if self.closed {
+            return Err(DeviceError::SessionClosed);
+        }
+
+        self.state.lock().set_noise_gate(gate)
+    }
+
+    fn set_compressor(&mut self, compressor: CompressorState) -> Result<(), DeviceError> {
+        if self.closed {
+            return Err(DeviceError::SessionClosed);
+        }
+
+        self.state.lock().set_compressor(compressor)
+    }
+
+    fn set_de_esser(&mut self, de_esser: DeEsserState) -> Result<(), DeviceError> {
+        if self.closed {
+            return Err(DeviceError::SessionClosed);
+        }
+
+        self.state.lock().set_de_esser(de_esser)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -201,6 +284,8 @@ struct MockHardware {
     connected: bool,
     identity: DeviceIdentity,
     faders: Vec<FaderState>,
+    routing: RoutingState,
+    microphone: MicrophoneState,
     events: VecDeque<MockEvent>,
 }
 
@@ -233,6 +318,10 @@ impl MockHardware {
                 fader(FaderName::C, ChannelName::Music, 214, false),
                 fader(FaderName::D, ChannelName::System, 160, true),
             ],
+            routing: RoutingState::default_for_outputs(
+                &DeviceCapabilities::mock().supported_routing_outputs,
+            ),
+            microphone: MicrophoneState::default_for_model(DeviceModel::GoXlrMini),
             events: VecDeque::new(),
         }
     }
@@ -242,6 +331,7 @@ impl MockHardware {
         fader: FaderName,
         volume: FaderVolume,
     ) -> Result<(), DeviceError> {
+        self.ensure_connected()?;
         let state = self.fader_mut(fader)?;
         if state.volume == Some(volume) {
             return Ok(());
@@ -254,6 +344,7 @@ impl MockHardware {
     }
 
     fn set_fader_mute(&mut self, fader: FaderName, muted: bool) -> Result<(), DeviceError> {
+        self.ensure_connected()?;
         let state = self.fader_mut(fader)?;
         let mute_state = if muted {
             FaderMuteState::MutedToAll
@@ -285,6 +376,7 @@ impl MockHardware {
         fader: FaderName,
         channel: ChannelName,
     ) -> Result<(), DeviceError> {
+        self.ensure_connected()?;
         if !DeviceCapabilities::mock()
             .supported_assignment_channels
             .contains(&channel)
@@ -311,6 +403,197 @@ impl MockHardware {
             .find(|state| state.name == fader)
             .ok_or_else(|| DeviceError::DeviceUnavailable(format!("missing mock fader {fader:?}")))
     }
+
+    fn set_routing_route(&mut self, route: RoutingRoute, enabled: bool) -> Result<(), DeviceError> {
+        self.ensure_connected()?;
+        if !DeviceCapabilities::mock().supported_routes.contains(&route) {
+            return Err(DeviceError::UnsupportedOperation(format!(
+                "unsupported mock routing path: {:?}",
+                route
+            )));
+        }
+
+        if self.routing.is_enabled(route) == Some(enabled) {
+            return Ok(());
+        }
+
+        self.routing.set_enabled(route, enabled)?;
+        self.events.push_back(MockEvent::RoutingChanged {
+            routing: self.routing.clone(),
+        });
+        Ok(())
+    }
+
+    fn set_microphone_type(
+        &mut self,
+        microphone_type: MicrophoneType,
+        confirm_phantom_power: bool,
+    ) -> Result<(), DeviceError> {
+        self.ensure_connected()?;
+        if microphone_type.has_phantom_power() && !confirm_phantom_power {
+            return Err(DeviceError::UnsupportedOperation(
+                "condenser microphone selection requires explicit phantom power confirmation"
+                    .to_string(),
+            ));
+        }
+
+        if self.microphone.setup.microphone_type == microphone_type {
+            return Ok(());
+        }
+
+        self.microphone.setup.microphone_type = microphone_type;
+        self.microphone.setup.phantom_power_enabled = microphone_type.has_phantom_power();
+        self.events.push_back(MockEvent::MicrophoneChanged {
+            microphone: self.microphone.clone(),
+        });
+        Ok(())
+    }
+
+    fn set_microphone_gain(
+        &mut self,
+        microphone_type: MicrophoneType,
+        gain_db: u16,
+    ) -> Result<(), DeviceError> {
+        self.ensure_connected()?;
+        validate_microphone_gain_db(gain_db)?;
+        let gain = self
+            .microphone
+            .gain_for_mut(microphone_type)
+            .ok_or_else(|| {
+                DeviceError::UnsupportedOperation(format!(
+                    "unsupported mock microphone type: {microphone_type}"
+                ))
+            })?;
+
+        if gain.hardware_db == gain_db {
+            return Ok(());
+        }
+
+        gain.hardware_db = gain_db;
+        self.events.push_back(MockEvent::MicrophoneChanged {
+            microphone: self.microphone.clone(),
+        });
+        Ok(())
+    }
+
+    fn set_equalizer_band(
+        &mut self,
+        band_id: EqBandId,
+        frequency_tenths_hz: u32,
+        gain_db: i8,
+    ) -> Result<(), DeviceError> {
+        self.ensure_connected()?;
+        validate_eq_gain_db(gain_db)?;
+        let capability = DeviceCapabilities::mock()
+            .eq_bands
+            .into_iter()
+            .find(|capability| capability.id == band_id)
+            .ok_or_else(|| {
+                DeviceError::UnsupportedOperation(format!("unsupported mock EQ band: {band_id:?}"))
+            })?;
+        validate_eq_frequency(&capability, frequency_tenths_hz)?;
+
+        let band = self.microphone.eq_band_mut(band_id).ok_or_else(|| {
+            DeviceError::DeviceUnavailable(format!("missing mock EQ band {band_id:?}"))
+        })?;
+        if band.frequency_tenths_hz == frequency_tenths_hz && band.gain_db == gain_db {
+            return Ok(());
+        }
+
+        *band = EqBandState {
+            id: band_id,
+            frequency_tenths_hz,
+            gain_db,
+        };
+        self.events.push_back(MockEvent::MicrophoneChanged {
+            microphone: self.microphone.clone(),
+        });
+        Ok(())
+    }
+
+    fn set_noise_gate(&mut self, gate: NoiseGateState) -> Result<(), DeviceError> {
+        self.ensure_connected()?;
+        validate_gate_threshold_db(gate.threshold_db)?;
+        validate_percent(gate.attenuation_percent)?;
+        if goxlr_model::gate_time_option(gate.attack.index).is_none() {
+            return Err(DeviceError::UnsupportedOperation(format!(
+                "unsupported gate attack index: {}",
+                gate.attack.index
+            )));
+        }
+        if goxlr_model::gate_time_option(gate.release.index).is_none() {
+            return Err(DeviceError::UnsupportedOperation(format!(
+                "unsupported gate release index: {}",
+                gate.release.index
+            )));
+        }
+
+        if self.microphone.gate == gate {
+            return Ok(());
+        }
+
+        self.microphone.gate = gate;
+        self.events.push_back(MockEvent::MicrophoneChanged {
+            microphone: self.microphone.clone(),
+        });
+        Ok(())
+    }
+
+    fn set_compressor(&mut self, compressor: CompressorState) -> Result<(), DeviceError> {
+        self.ensure_connected()?;
+        validate_compressor_threshold_db(compressor.threshold_db)?;
+        validate_compressor_makeup_gain_db(compressor.makeup_gain_db)?;
+        if compressor_ratio_option(compressor.ratio.index).is_none() {
+            return Err(DeviceError::UnsupportedOperation(format!(
+                "unsupported compressor ratio index: {}",
+                compressor.ratio.index
+            )));
+        }
+        if compressor_attack_option(compressor.attack.index).is_none() {
+            return Err(DeviceError::UnsupportedOperation(format!(
+                "unsupported compressor attack index: {}",
+                compressor.attack.index
+            )));
+        }
+        if compressor_release_option(compressor.release.index).is_none() {
+            return Err(DeviceError::UnsupportedOperation(format!(
+                "unsupported compressor release index: {}",
+                compressor.release.index
+            )));
+        }
+
+        if self.microphone.compressor == compressor {
+            return Ok(());
+        }
+
+        self.microphone.compressor = compressor;
+        self.events.push_back(MockEvent::MicrophoneChanged {
+            microphone: self.microphone.clone(),
+        });
+        Ok(())
+    }
+
+    fn set_de_esser(&mut self, de_esser: DeEsserState) -> Result<(), DeviceError> {
+        self.ensure_connected()?;
+        validate_percent(de_esser.amount_percent)?;
+        if self.microphone.de_esser == de_esser {
+            return Ok(());
+        }
+
+        self.microphone.de_esser = de_esser;
+        self.events.push_back(MockEvent::MicrophoneChanged {
+            microphone: self.microphone.clone(),
+        });
+        Ok(())
+    }
+
+    fn ensure_connected(&self) -> Result<(), DeviceError> {
+        if self.connected {
+            Ok(())
+        } else {
+            Err(DeviceError::DeviceDisconnected)
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -331,6 +614,12 @@ enum MockEvent {
     FaderAssignmentChanged {
         fader: FaderName,
         channel: ChannelName,
+    },
+    RoutingChanged {
+        routing: RoutingState,
+    },
+    MicrophoneChanged {
+        microphone: MicrophoneState,
     },
     Disconnected,
 }
@@ -371,6 +660,16 @@ impl MockEvent {
                     channel: Some(channel),
                 }
             }
+            MockEvent::RoutingChanged { routing } => DeviceEvent::RoutingChanged {
+                device_id,
+                generation,
+                routing,
+            },
+            MockEvent::MicrophoneChanged { microphone } => DeviceEvent::MicrophoneChanged {
+                device_id,
+                generation,
+                microphone,
+            },
             MockEvent::Disconnected => DeviceEvent::Disconnected {
                 device_id,
                 generation,
@@ -474,6 +773,86 @@ mod tests {
                 pressed: true,
             }
         );
+    }
+
+    #[test]
+    fn mock_session_reports_routing_events() {
+        let provider = MockDeviceProvider::new(true);
+        let identity = provider.discover().unwrap().devices[0].identity.clone();
+        let mut session = provider.open_session(&identity, 11).unwrap();
+        let route = RoutingRoute {
+            input: goxlr_model::RoutingInput::Music,
+            output: goxlr_model::RoutingOutput::BroadcastMix,
+        };
+
+        session.set_routing_route(route, false).unwrap();
+
+        let event = session.poll_event().unwrap().unwrap();
+        match event {
+            DeviceEvent::RoutingChanged {
+                device_id,
+                generation,
+                routing,
+            } => {
+                assert_eq!(device_id, identity.id);
+                assert_eq!(generation, 11);
+                assert_eq!(routing.is_enabled(route), Some(false));
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn mock_session_reports_microphone_events() {
+        let provider = MockDeviceProvider::new(true);
+        let identity = provider.discover().unwrap().devices[0].identity.clone();
+        let mut session = provider.open_session(&identity, 12).unwrap();
+
+        session
+            .set_microphone_gain(MicrophoneType::Dynamic, 45)
+            .unwrap();
+
+        let event = session.poll_event().unwrap().unwrap();
+        match event {
+            DeviceEvent::MicrophoneChanged {
+                device_id,
+                generation,
+                microphone,
+            } => {
+                assert_eq!(device_id, identity.id);
+                assert_eq!(generation, 12);
+                assert_eq!(microphone.setup.gains[0].hardware_db, 45);
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn mock_rejects_unsupported_and_disconnected_commands() {
+        let provider = MockDeviceProvider::new(true);
+        let identity = provider.discover().unwrap().devices[0].identity.clone();
+        let mut session = provider.open_session(&identity, 13).unwrap();
+
+        assert!(matches!(
+            session.set_routing_route(
+                RoutingRoute {
+                    input: goxlr_model::RoutingInput::Chat,
+                    output: goxlr_model::RoutingOutput::ChatMic,
+                },
+                true,
+            ),
+            Err(DeviceError::UnsupportedOperation(_))
+        ));
+        assert!(matches!(
+            session.set_microphone_type(MicrophoneType::Condenser, false),
+            Err(DeviceError::UnsupportedOperation(_))
+        ));
+
+        provider.simulate_disconnect();
+        assert!(matches!(
+            session.set_microphone_gain(MicrophoneType::Dynamic, 20),
+            Err(DeviceError::DeviceDisconnected)
+        ));
     }
 
     #[test]

@@ -47,8 +47,9 @@ mod windows_tusb {
 }
 
 use goxlr_model::{
-    ChannelName, DeviceCapabilities, DeviceIdentity, FaderMuteState, FaderName, FaderState,
-    FaderVolume, VersionNumber,
+    ChannelName, CompressorState, DeEsserState, DeviceCapabilities, DeviceIdentity, EqBandId,
+    FaderMuteState, FaderName, FaderState, FaderVolume, MicrophoneState, MicrophoneType,
+    NoiseGateState, RoutingRoute, RoutingState, VersionNumber,
 };
 use std::sync::Arc;
 
@@ -69,6 +70,8 @@ pub struct DriverInfo {
 pub struct DeviceReadOnlyState {
     pub capabilities: DeviceCapabilities,
     pub faders: Vec<FaderState>,
+    pub routing: Option<RoutingState>,
+    pub microphone: Option<MicrophoneState>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -87,6 +90,8 @@ pub struct DeviceSessionState {
     pub identity: DeviceIdentity,
     pub capabilities: DeviceCapabilities,
     pub faders: Vec<FaderState>,
+    pub routing: Option<RoutingState>,
+    pub microphone: Option<MicrophoneState>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -116,6 +121,16 @@ pub enum DeviceEvent {
         fader: FaderName,
         channel: Option<ChannelName>,
     },
+    RoutingChanged {
+        device_id: String,
+        generation: SessionGeneration,
+        routing: RoutingState,
+    },
+    MicrophoneChanged {
+        device_id: String,
+        generation: SessionGeneration,
+        microphone: MicrophoneState,
+    },
     Disconnected {
         device_id: String,
         generation: SessionGeneration,
@@ -129,6 +144,8 @@ impl DeviceEvent {
             | DeviceEvent::FaderMuteStateChanged { device_id, .. }
             | DeviceEvent::FaderMuteButtonChanged { device_id, .. }
             | DeviceEvent::FaderAssignmentChanged { device_id, .. }
+            | DeviceEvent::RoutingChanged { device_id, .. }
+            | DeviceEvent::MicrophoneChanged { device_id, .. }
             | DeviceEvent::Disconnected { device_id, .. } => device_id,
         }
     }
@@ -139,6 +156,8 @@ impl DeviceEvent {
             | DeviceEvent::FaderMuteStateChanged { generation, .. }
             | DeviceEvent::FaderMuteButtonChanged { generation, .. }
             | DeviceEvent::FaderAssignmentChanged { generation, .. }
+            | DeviceEvent::RoutingChanged { generation, .. }
+            | DeviceEvent::MicrophoneChanged { generation, .. }
             | DeviceEvent::Disconnected { generation, .. } => *generation,
         }
     }
@@ -185,6 +204,65 @@ pub trait DeviceSession: Send {
     ) -> Result<(), DeviceError> {
         Err(DeviceError::UnsupportedOperation(
             "fader assignment writes are not enabled for this device".to_string(),
+        ))
+    }
+
+    fn set_routing_route(
+        &mut self,
+        _route: RoutingRoute,
+        _enabled: bool,
+    ) -> Result<(), DeviceError> {
+        Err(DeviceError::UnsupportedOperation(
+            "routing writes are not enabled for this device".to_string(),
+        ))
+    }
+
+    fn set_microphone_type(
+        &mut self,
+        _microphone_type: MicrophoneType,
+        _confirm_phantom_power: bool,
+    ) -> Result<(), DeviceError> {
+        Err(DeviceError::UnsupportedOperation(
+            "microphone type writes are not enabled for this device".to_string(),
+        ))
+    }
+
+    fn set_microphone_gain(
+        &mut self,
+        _microphone_type: MicrophoneType,
+        _gain_db: u16,
+    ) -> Result<(), DeviceError> {
+        Err(DeviceError::UnsupportedOperation(
+            "microphone gain writes are not enabled for this device".to_string(),
+        ))
+    }
+
+    fn set_equalizer_band(
+        &mut self,
+        _band_id: EqBandId,
+        _frequency_tenths_hz: u32,
+        _gain_db: i8,
+    ) -> Result<(), DeviceError> {
+        Err(DeviceError::UnsupportedOperation(
+            "equalizer writes are not enabled for this device".to_string(),
+        ))
+    }
+
+    fn set_noise_gate(&mut self, _gate: NoiseGateState) -> Result<(), DeviceError> {
+        Err(DeviceError::UnsupportedOperation(
+            "noise gate writes are not enabled for this device".to_string(),
+        ))
+    }
+
+    fn set_compressor(&mut self, _compressor: CompressorState) -> Result<(), DeviceError> {
+        Err(DeviceError::UnsupportedOperation(
+            "compressor writes are not enabled for this device".to_string(),
+        ))
+    }
+
+    fn set_de_esser(&mut self, _de_esser: DeEsserState) -> Result<(), DeviceError> {
+        Err(DeviceError::UnsupportedOperation(
+            "de-esser writes are not enabled for this device".to_string(),
         ))
     }
 }
@@ -294,5 +372,11 @@ impl From<goxlr_protocol::ProtocolError> for DeviceError {
             }
             other => DeviceError::Protocol(other.to_string()),
         }
+    }
+}
+
+impl From<goxlr_model::ModelError> for DeviceError {
+    fn from(value: goxlr_model::ModelError) -> Self {
+        DeviceError::UnsupportedOperation(value.to_string())
     }
 }

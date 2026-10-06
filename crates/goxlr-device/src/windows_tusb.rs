@@ -797,7 +797,7 @@ impl TusbDeviceSession {
     fn state_from_button_state(&self) -> DeviceSessionState {
         DeviceSessionState {
             identity: self.identity.clone(),
-            capabilities: DeviceCapabilities::physical_read_only(),
+            capabilities: DeviceCapabilities::physical_read_only(self.identity.model),
             faders: FaderName::ALL
                 .into_iter()
                 .map(|name| FaderState {
@@ -810,6 +810,8 @@ impl TusbDeviceSession {
                     mute_button_pressed: Some(self.last_button_state.fader_mute_pressed(name)),
                 })
                 .collect(),
+            routing: None,
+            microphone: None,
         }
     }
 
@@ -1026,6 +1028,8 @@ fn empty_session_state(identity: DeviceIdentity) -> DeviceSessionState {
         identity,
         capabilities: DeviceCapabilities::unavailable(),
         faders: unavailable_faders(),
+        routing: None,
+        microphone: None,
     }
 }
 
