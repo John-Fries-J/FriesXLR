@@ -28,6 +28,17 @@ The following GoXLR Utility areas were studied before Phase 1 implementation:
   `usb/src/buttonstate.rs`, `daemon/src/device.rs`.
 - Routing and GoXLR Mini differences:
   `usb/src/routing.rs`, `types/src/lib.rs`, `daemon/src/device.rs`.
+- Phase 3 routing and microphone processing:
+  `usb/src/routing.rs`, `usb/src/commands.rs`, `usb/src/device/base.rs`,
+  `types/src/lib.rs`, `ipc/src/lib.rs`, `ipc/src/device.rs`,
+  `daemon/src/device.rs`, `daemon/src/mic_profile.rs`,
+  `daemon/src/profile.rs`, `profile/src/mic_profile.rs`,
+  `profile/src/microphone/mic_setup.rs`,
+  `profile/src/microphone/equalizer.rs`,
+  `profile/src/microphone/equalizer_mini.rs`,
+  `profile/src/microphone/gate.rs`,
+  `profile/src/microphone/compressor.rs`,
+  `profile/src/components/mixer.rs`.
 - Windows tray/runtime behavior: `daemon/src/tray/windows.rs`,
   `daemon/src/platform/windows.rs`.
 
@@ -81,10 +92,53 @@ The desktop app exposes:
 
 - `get_snapshot`
 - `set_mock_device_enabled`
+- fader write commands
+- routing write commands
+- microphone setup, gain, EQ, gate, compressor, and de-esser write commands
 - `friesxlr://snapshot` events
 
 The frontend Zustand store is a cache of the backend snapshot, not a second
 source of truth.
+
+## Phase 3 Routing And Microphone State
+
+`DeviceState` now keeps mixer faders, routing, and microphone processing as
+separate nested domains. `DeviceCapabilities` carries endpoint, route,
+microphone type, gain range, EQ band, gate, compressor, and de-esser
+availability so the frontend does not branch on GoXLR vs GoXLR Mini directly.
+
+The verified routing command is GoXLR Utility's `SetRouting` command:
+
+- command id: `(0x804 << 12) | stereo_input_id`
+- stereo input ids: mic `0x02/0x03`, line in `0x04/0x05`, console
+  `0x06/0x07`, system `0x08/0x09`, game `0x0a/0x0b`, chat `0x0c/0x0d`,
+  music `0x0e/0x0f`, sample `0x10/0x11`
+- enabled route byte: `0x20` at the destination channel position
+- base payload length: 22 bytes; Mix 2 capable payload length: 26 bytes
+- FriesXLR models the upstream-invalid Chat -> Chat Mic route as unsupported
+
+The verified microphone setup command is GoXLR Utility's
+`SetMicrophoneParameters` command (`0x80b << 12`). It sends repeated
+little-endian parameter id + four-byte value records. Mic gain is represented in
+hardware dB and encoded in the upper two bytes of the four-byte value. The
+verified mic type parameter is `MicType`; GoXLR Utility sends `1` for condenser
+and `0` otherwise. FriesXLR therefore requires explicit condenser/phantom
+confirmation before selecting condenser mode.
+
+GoXLR Mini EQ is written through microphone parameters. Full-size GoXLR EQ,
+gate, compressor, and de-esser values are written through the verified
+`SetEffectParameters` command (`0x801 << 12`), while shared gate/compressor
+values also have microphone-parameter encodings used by GoXLR Utility. The
+conversion helpers live in `crates/goxlr-protocol`; React receives meaningful
+units from the model and does not convert raw protocol payloads itself.
+
+FriesXLR still does not have a verified active profile source for physical
+devices. Because upstream derives routing, fader assignment, fader mute
+configuration, and most microphone processing state from the active profile and
+mic profile, physical Phase 3 controls remain capability-disabled until that
+state can be read safely. The mock provider exposes writable routing and
+microphone processing through the same service/session path used by real
+hardware.
 
 ## Long-Term Service Direction
 

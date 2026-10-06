@@ -22,9 +22,16 @@ Phase 1 establishes the foundation:
 - Structured JSON file logging.
 - Basic tests, lint/build scripts, documentation, and GitHub Actions.
 
-Phase 1 does not send mixer-setting commands at startup. Real fader positions,
-mute state, and assignments are exposed only by the mock provider until the
-read-only hardware-state path has been verified against real devices.
+Phase 2 adds persistent physical sessions, read-only hardware fader/button
+status, reconnect handling, selected-device state, and mock-backed writable
+mixer controls.
+
+Phase 3 adds typed routing and microphone-processing state, protocol encoders,
+mock-backed routing and mic controls, and desktop UI for Routing and
+Microphone. Real physical routing and microphone controls remain disabled until
+FriesXLR has authoritative active profile/mic-profile state for the selected
+device. FriesXLR does not overwrite mixer routing or microphone settings on
+startup.
 
 ## Requirements
 
@@ -66,6 +73,7 @@ crates/
   goxlr-service/           Backend service loop and snapshot events
 docs/
   architecture.md
+  phase-3-manual-checklist.md
   windows-development.md
 ```
 

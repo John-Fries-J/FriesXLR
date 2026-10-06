@@ -26,6 +26,14 @@ adapted from GoXLR Utility and are attributed under the MIT license:
   payload shapes used to decide when button or fader state should be reread.
 - Fader assignment, mute function, and mute-state enum ordering as exposed by
   GoXLR Utility profile and IPC state.
+- Routing input ids, routing output payload positions, the `SetRouting`
+  command id, and the profile route matrix shape.
+- Microphone type/gain parameter ids and payload encoding, including GoXLR
+  Utility's condenser/phantom-power mic type semantics.
+- Microphone EQ, gate, compressor, and de-esser parameter/effect ids, supported
+  ranges, indexed time/ratio tables, and GoXLR vs GoXLR Mini EQ differences.
+- GoXLR Utility profile and mic-profile XML attribute names for routing,
+  microphone setup, EQ, gate, compressor, and de-esser state.
 
 GoXLR Utility exposes fader assignment and fader mute behaviour from its active
 profile state. FriesXLR's current direct physical session does not fabricate
